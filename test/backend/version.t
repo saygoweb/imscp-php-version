@@ -61,6 +61,27 @@ is(plugin()->_wantedVersion({ php_version => '8.9' }), '7.3',
 is(plugin(forceDefault => 1)->_wantedVersion({ php_version => '8.1' }), '7.3',
     'forceDefault overrides a recorded choice');
 
+# ...but it must not outlive them. Modules::Plugin::_change() and ::_update()
+# both run disable() and then enable() against the one instance, and an i-MSCP
+# reconfigure puts every enabled plugin through 'tochange'. If enable() left the
+# flag standing, every vhost in the same run would be rebuilt onto the default
+# version while its row still named another one: the pools would silently move
+# back and the panel would go on reporting the version nobody was running.
+{
+    no warnings 'redefine';
+    local *Plugin::SGW_PhpVersion::_checkRequirements     = sub { 0 };
+    local *Plugin::SGW_PhpVersion::_refreshInstalledVersions = sub { 0 };
+    local *Plugin::SGW_PhpVersion::_scheduleRebuild       = sub { 0 };
+    local *Plugin::SGW_PhpVersion::_startVersionsInUse    = sub { 0 };
+
+    my $p = plugin(forceDefault => 1);
+    $p->enable();
+    ok(!$p->{'forceDefault'},
+        'enable() clears the flag disable() set, so a plugin change does not reset every vhost');
+    is($p->_wantedVersion({ php_version => '8.1' }), '8.1',
+        'and a pinned vhost is built on its own version after a disable/enable cycle');
+}
+
 # --- Which version a domain was last built on ------------------------------
 #
 # This is what tells the sweep which pool.d still holds a stale file.

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+* Fixed every vhost being rebuilt onto the panel default version, while its
+  recorded choice was left untouched, whenever the plugin passed through the
+  `tochange` state. `Modules::Plugin` runs `disable()` and then `enable()` on
+  the one instance for a change or an update, and an i-MSCP reconfigure puts
+  every enabled plugin through `tochange`, so the flag `disable()` sets to force
+  the default version was still standing when the domains were rebuilt in the
+  same run.
+
 ## 0.1.0
 
 First release.

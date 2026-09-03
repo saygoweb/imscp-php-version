@@ -108,6 +108,14 @@ sub enable
 {
     my ($self) = @_;
 
+    # Modules::Plugin::_change() and ::_update() both call disable() and then
+    # enable() on this same instance, so the flag disable() sets to force every
+    # rebuild onto the default version is still on when we get here. Clearing it
+    # is what stops a plugin change, a plugin update or an i-MSCP reconfigure --
+    # all of which put the plugin through 'tochange' -- from rebuilding every
+    # vhost onto the default version while its row still names another one.
+    $self->{'forceDefault'} = 0;
+
     my $rs = $self->_checkRequirements();
     $rs ||= $self->_refreshInstalledVersions();
     return $rs if $rs;
