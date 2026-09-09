@@ -21,9 +21,9 @@
 return array(
     'author'      => 'Cambell Prince',
     'email'       => 'cambell.prince@gmail.com',
-    'version'     => '0.1.1',
+    'version'     => '0.1.2',
     'require_api' => '1.5.1',
-    'date'        => '2026-09-02',
+    'date'        => '2026-09-09',
     'name'        => 'SGW_PhpVersion',
     'desc'        => 'Lets a customer choose which installed PHP version each of their domains runs on.',
     'url'         => 'https://github.com/saygoweb/imscp-php-version'

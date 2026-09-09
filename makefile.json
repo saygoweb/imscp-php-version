@@ -1,10 +1,22 @@
 {
     "variables": {
-        "name": "SGW_PhpVersion"
+        "name": "SGW_PhpVersion",
+        "sudo": "sudo",
+        "bump": "patch"
     },
     "clean": {
         "by": [
             "rm -f ./*.tgz"
+        ]
+    },
+    "test": {
+        "by": [
+            "cd test/backend && {{sudo}} perl all.t"
+        ]
+    },
+    "version": {
+        "by": [
+            "php tools/version.php {{bump}}"
         ]
     },
     "package": {
