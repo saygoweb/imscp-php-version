@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+* Fixed the reseller page returning a fatal error, rather than a bad request,
+  for a reseller with no customers. The navigation entry is gated on
+  `resellerHasCustomers`, so for such a reseller the page had no entry in the
+  menu, and the shared layout -- which reads a page's title and title class off
+  whichever menu entry matches the request -- had nothing to read them from.
+  The page now asserts the same condition its menu entry is gated on, as every
+  i-MSCP page behind that condition does.
+
 ## 0.2.0
 
 * A vhost can be put in a PHP-FPM pool as well as on a PHP version. A pool is a

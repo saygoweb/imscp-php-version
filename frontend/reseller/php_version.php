@@ -184,6 +184,13 @@ function generatePage($tpl, $resellerId)
 EventAggregator::getInstance()->dispatch(Events::onResellerScriptStart);
 check_login('reseller');
 
+// The same condition the navigation entry is gated on. Without it a reseller
+// with no customers reaches a page that has no entry in their menu, and the
+// shared layout -- which reads the title and its class off whichever menu
+// entry matches the request -- has nothing to read them from and dies. Every
+// i-MSCP page behind resellerHasCustomers asserts it here for that reason.
+resellerHasCustomers() or showBadRequestErrorPage();
+
 $resellerId = intval($_SESSION['user_id']);
 
 handleSubmit($resellerId);
