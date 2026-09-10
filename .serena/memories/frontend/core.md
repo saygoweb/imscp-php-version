@@ -56,6 +56,10 @@ that could never take effect.
 - `rawVersion()` (the recorded choice, `''` = follow the default) drives the selectors, so submitting
   a page unchanged records no change. `chosenVersion()` (what it resolves to) drives the "Running"
   column. Keep the two apart.
-- Access: the client page requires `customerHasFeature('php')`, checked in both the nav injection and
-  the page itself. The reseller nav entry uses the `resellerHasCustomers` privilege callback.
+- Access: the client page requires `customerHasFeature('php')` and the reseller page
+  `resellerHasCustomers()`, each checked **in both** the nav injection and the page itself. The two
+  must stay in step: `shared/layouts/ui.tpl` reads a page's title and `title_class` off whichever
+  navigation entry matches the request, so a page reachable by URL whose menu entry is hidden dies
+  with `Call to a member function get() on null` instead of rendering. Every i-MSCP page behind such
+  a condition asserts it right after `check_login()` for exactly this reason (0.2.1 bug).
 - Everything user-visible goes through `tr()` and `tohtml()`; domain names through `decode_idna()`.
