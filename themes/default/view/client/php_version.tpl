@@ -14,7 +14,9 @@
             <th>{TR_DOMAIN_NAME}</th>
             <th>{TR_DOMAIN_KIND}</th>
             <th>{TR_CURRENT}</th>
+            <th>{TR_CURRENT_POOL}</th>
             <th>{TR_NEW_VERSION}</th>
+            <th>{TR_NEW_POOL}</th>
         </tr>
         </thead>
         <tbody>
@@ -25,9 +27,15 @@
             <td>{DOMAIN_NAME}</td>
             <td>{DOMAIN_KIND}</td>
             <td>{CURRENT_VERSION}</td>
+            <td>{CURRENT_POOL}</td>
             <td>
                 <select name="version[{DOMAIN_KEY}]" data-key="{DOMAIN_KEY}"{ROW_DISABLED}>
                     {VERSION_OPTIONS}
+                </select>
+            </td>
+            <td>
+                <select name="pool[{DOMAIN_KEY}]" data-pool-key="{DOMAIN_KEY}"{ROW_DISABLED}>
+                    {POOL_OPTIONS}
                 </select>
             </td>
         </tr>
@@ -39,6 +47,9 @@
         <label for="php_version_bulk">{TR_BULK_SET}</label>
         <select id="php_version_bulk">{BULK_OPTIONS}</select>
         <button type="button" id="php_version_bulk_apply">{TR_BULK_APPLY}</button>
+        <label for="php_version_bulk_pool">{TR_BULK_SET_POOL}</label>
+        <select id="php_version_bulk_pool">{BULK_POOL_OPTIONS}</select>
+        <button type="button" id="php_version_bulk_pool_apply">{TR_BULK_APPLY}</button>
         <input name="submit" type="submit" value="{TR_APPLY}">
     </div>
 </form>
@@ -46,9 +57,11 @@
 <script>
     (function ($) {
         // The per-row selects are what the form actually submits. The bulk
-        // control is a convenience that fills them in, so a reseller or a
-        // customer with many domains can set them all in one go and still see
-        // exactly what is about to be submitted before pressing Apply.
+        // controls are a convenience that fill them in -- one for version,
+        // one for pool, each acting only on its own selects -- so a reseller
+        // or a customer with many domains can set them all in one go and
+        // still see exactly what is about to be submitted before pressing
+        // Apply.
         $("#php_version_all").on("change", function () {
             $(".php_version_pick:not(:disabled)").prop("checked", this.checked);
         });
@@ -58,6 +71,14 @@
 
             $(".php_version_pick:checked").each(function () {
                 $("select[data-key='" + $(this).val() + "']").val(version);
+            });
+        });
+
+        $("#php_version_bulk_pool_apply").on("click", function () {
+            var pool = $("#php_version_bulk_pool").val();
+
+            $(".php_version_pick:checked").each(function () {
+                $("select[data-pool-key='" + $(this).val() + "']").val(pool);
             });
         });
     })(jQuery);

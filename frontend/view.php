@@ -60,6 +60,34 @@ function versionOptions(array $versions, $selected)
 }
 
 /**
+ * The <option> list for a pool selector.
+ *
+ * The empty value is the instance the distribution ships, which every vhost
+ * starts in. Unlike the version's empty option it is not a "follow whatever is
+ * set elsewhere" choice -- the default instance is simply one of the pools --
+ * so it is preselected whenever the vhost has no other pool recorded.
+ *
+ * @param array $pools Pool name => label
+ * @param string|null $selected Pool to preselect, or NULL for none
+ * @return string
+ */
+function poolOptions(array $pools, $selected)
+{
+    $html = '';
+
+    foreach ($pools as $pool => $label) {
+        $html .= sprintf(
+            '<option value="%s"%s>%s</option>',
+            tohtml($pool, 'htmlAttr'),
+            ($selected === $pool ? ' selected' : ''),
+            tohtml($label)
+        );
+    }
+
+    return $html;
+}
+
+/**
  * What a domain is running, said in words.
  *
  * @param array $domain Row as returned by fetchDomains()
