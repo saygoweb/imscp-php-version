@@ -29,5 +29,24 @@ return array(
     // pool that i-MSCP builds for the version it was set up with, so that a
     // domain does not silently change timezone, opcache or session behaviour
     // just by moving between versions.
-    'sync_php_conf' => true
+    'sync_php_conf' => true,
+
+    // PHP-FPM instances a domain may be placed in, beyond the one the
+    // distribution ships. Each is a master process of its own, with its own
+    // service and its own configuration directory, so that it can be tuned --
+    // process manager, limits, php.ini -- independently of every other site on
+    // the machine:
+    //
+    //   'cloudflare' => php8.3-fpm-cloudflare.service, /etc/php/8.3-cloudflare
+    //
+    // The key names the service and the directory, so it must be lowercase
+    // letters, digits and hyphens; the value is what the panel calls it. The
+    // default instance is always offered and is not listed here.
+    //
+    // The plugin creates the directory and the service for a pool the first
+    // time it is needed and never writes over either again: from there on they
+    // are yours to tune.
+    'pools' => array(
+        'cloudflare' => 'Cloudflare'
+    )
 );

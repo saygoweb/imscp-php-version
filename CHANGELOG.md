@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0
+
+* A vhost can be put in a PHP-FPM pool as well as on a PHP version. A pool is a
+  second FPM master for that version -- its own process manager, limits and
+  `php.ini` -- serving only the vhosts put into it, so a handful of sites can be
+  tuned without those settings reaching every other site on the machine.
+* Pools are declared by the administrator as `pools` in `config.php`. The
+  default instance, the one the distribution ships, is always offered.
+* The plugin builds a pool the first time a vhost is put in it: the
+  `/etc/php/<version>-<pool>` directory, its `php.ini`, `php-fpm.conf` and
+  placeholder pool, and a `php<version>-fpm-<pool>.service` unit derived from
+  the distribution's own. Each is written once and never written over again, so
+  hand tuning survives; uninstalling leaves both the directories and the units
+  in place for the same reason.
+* Both panels gained a pool column and a bulk **Set** button of its own, so a
+  batch can be moved between pools without touching anybody's version.
+
 ## 0.1.1
 
 * Fixed every vhost being rebuilt onto the panel default version, while its

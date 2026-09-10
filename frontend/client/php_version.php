@@ -32,11 +32,11 @@ require_once __DIR__ . '/../view.php';
  */
 
 /**
- * Save the versions the customer submitted.
+ * Save the versions and pools the customer submitted.
  *
- * The form carries one version per vhost, so a customer may move several
- * domains onto different versions in a single submit. Only the ones that
- * actually differ are acted on.
+ * The form carries one version and one pool per vhost, so a customer may move
+ * several domains onto different versions or pools in a single submit. Only
+ * the ones that actually differ are acted on.
  *
  * @param int $adminId Customer unique identifier
  * @return void
@@ -49,17 +49,21 @@ function handleSubmit($adminId)
 
     $wanted = isset($_POST['version']) && is_array($_POST['version'])
         ? $_POST['version'] : array();
+    $wantedPools = isset($_POST['pool']) && is_array($_POST['pool'])
+        ? $_POST['pool'] : array();
     $installed = installedVersions();
+    $pools = pools();
     $applied = 0;
 
     foreach (getDomains($adminId) as $domain) {
         $key = domainKey($domain);
 
-        if (!isset($wanted[$key])) {
+        if (!isset($wanted[$key]) || !isset($wantedPools[$key])) {
             continue;
         }
 
         $version = clean_input($wanted[$key]);
+        $pool = clean_input($wantedPools[$key]);
 
         // '' is the panel default, which is always a valid choice; anything
         // else has to be a version the backend has reported as installed.
@@ -67,18 +71,27 @@ function handleSubmit($adminId)
             showBadRequestErrorPage();
         }
 
-        if (!isSettled($domain) || rawVersion($domain) === $version) {
+        // Unlike the version above, '' is itself a legitimate key of
+        // pools() -- it names the default instance -- so it needs no
+        // special case here before the lookup.
+        if (!array_key_exists($pool, $pools)) {
+            showBadRequestErrorPage();
+        }
+
+        if (!isSettled($domain)
+            || (rawVersion($domain) === $version && rawPool($domain) === $pool)
+        ) {
             continue;
         }
 
-        setVersion($domain, $version);
+        setChoice($domain, $version, $pool);
         $applied++;
     }
 
     if ($applied) {
         send_request();
         set_page_message(
-            tr('PHP version scheduled to change on %d domain(s).', $applied), 'success'
+            tr('PHP settings scheduled to change on %d domain(s).', $applied), 'success'
         );
     } else {
         set_page_message(tr('Nothing to change.'), 'info');
@@ -97,6 +110,7 @@ function handleSubmit($adminId)
 function generatePage($tpl, $adminId)
 {
     $versions = installedVersions();
+    $pools = pools();
 
     if (!$versions) {
         $tpl->assign(array(
@@ -121,8 +135,9 @@ function generatePage($tpl, $adminId)
     }
 
     $tpl->assign(array(
-        'NO_DOMAINS_BLOCK' => '',
-        'BULK_OPTIONS'     => versionOptions($versions, NULL)
+        'NO_DOMAINS_BLOCK'  => '',
+        'BULK_OPTIONS'      => versionOptions($versions, NULL),
+        'BULK_POOL_OPTIONS' => poolOptions($pools, NULL)
     ));
 
     foreach ($domains as $domain) {
@@ -135,7 +150,9 @@ function generatePage($tpl, $adminId)
             'STATUS'          => tohtml(statusText($domain['status'])),
             'STATUS_ICON'     => statusIcon($domain['status']),
             'CURRENT_VERSION' => tohtml(versionLabel($domain, $versions)),
+            'CURRENT_POOL'    => tohtml(poolLabel($domain, $pools)),
             'VERSION_OPTIONS' => versionOptions($versions, rawVersion($domain)),
+            'POOL_OPTIONS'    => poolOptions($pools, rawPool($domain)),
             'ROW_DISABLED'    => $settled ? '' : ' disabled'
         ));
 
@@ -169,17 +186,20 @@ $tpl->define_dynamic(array(
     'domain_item'      => 'domain_list'
 ));
 $tpl->assign(array(
-    'TR_PAGE_TITLE'   => tr('Client / Domains / PHP Version'),
-    'TR_INTRO'        => tr('Choose which PHP version each of your domains runs. Versions run side by side, so different domains may be on different versions.'),
-    'TR_STATUS'       => tr('Status'),
-    'TR_DOMAIN_NAME'  => tr('Domain'),
-    'TR_DOMAIN_KIND'  => tr('Type'),
-    'TR_CURRENT'      => tr('Running'),
-    'TR_NEW_VERSION'  => tr('PHP version'),
-    'TR_BULK_SET'     => tr('Set ticked domains to'),
-    'TR_BULK_APPLY'   => tr('Set'),
-    'TR_APPLY'        => tr('Apply'),
-    'TR_SELECT_ALL'   => tr('Select all')
+    'TR_PAGE_TITLE'     => tr('Client / Domains / PHP Version'),
+    'TR_INTRO'          => tr('Choose which PHP version each of your domains runs and which pool it runs in. Versions and pools run side by side, so different domains may be on different ones.'),
+    'TR_STATUS'         => tr('Status'),
+    'TR_DOMAIN_NAME'    => tr('Domain'),
+    'TR_DOMAIN_KIND'    => tr('Type'),
+    'TR_CURRENT'        => tr('Running'),
+    'TR_CURRENT_POOL'   => tr('Pool'),
+    'TR_NEW_VERSION'    => tr('PHP version'),
+    'TR_NEW_POOL'       => tr('PHP pool'),
+    'TR_BULK_SET'       => tr('Set ticked domains to'),
+    'TR_BULK_SET_POOL'  => tr('Set ticked domains to pool'),
+    'TR_BULK_APPLY'     => tr('Set'),
+    'TR_APPLY'          => tr('Apply'),
+    'TR_SELECT_ALL'     => tr('Select all')
 ));
 
 generateNavigation($tpl);

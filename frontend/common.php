@@ -42,7 +42,8 @@ function fetchDomains($ownerCondition, array $params)
 {
     $sql = "
         SELECT v.*, ad.admin_name,
-            p.php_version_id, p.php_version, p.applied_version, p.status
+            p.php_version_id, p.php_version, p.php_pool,
+            p.applied_version, p.applied_pool, p.status
         FROM (
             SELECT 'dmn' AS domain_type, d.domain_id AS domain_id,
                 d.domain_admin_id AS admin_id,
@@ -179,6 +180,42 @@ function installedVersions()
 }
 
 /**
+ * The PHP-FPM instances a vhost may be placed in.
+ *
+ * Unlike the versions, this is not a discovery: a pool exists because the
+ * administrator listed it in config.php, and the backend builds it the first
+ * time a vhost is put in it. The empty key is the instance the distribution
+ * ships, which is always offered and is where every vhost starts.
+ *
+ * @return array Pool name => label, the default instance first
+ */
+function pools()
+{
+    static $pools = NULL;
+
+    if (NULL === $pools) {
+        $pools = array('' => tr('Default'));
+
+        /** @var \iMSCP\Plugin\PluginManager $pluginManager */
+        $pluginManager = \iMSCP\Registry::get('pluginManager');
+        $configured = $pluginManager->pluginGet('SGW_PhpVersion')
+            ->getConfigParam('pools', array());
+
+        if (is_array($configured)) {
+            foreach ($configured as $name => $label) {
+                // A pool name ends up in a service name and a directory name,
+                // so anything that would not survive both is not offered.
+                if (preg_match('/^[a-z0-9][a-z0-9-]*$/', $name)) {
+                    $pools[$name] = $label;
+                }
+            }
+        }
+    }
+
+    return $pools;
+}
+
+/**
  * The version a vhost with no choice of its own runs on.
  *
  * @return string Version string, or '' when the backend has not run yet
@@ -224,71 +261,85 @@ function chosenVersion(array $domain)
 }
 
 /**
- * Record a choice of version for one vhost, and schedule the rebuild.
+ * The pool a vhost is in, as recorded.
+ *
+ * '' is the instance the distribution ships. There is no second reading of it
+ * the way there is for the version -- the default pool cannot move underneath
+ * a vhost -- so this is both the choice and what it resolves to.
+ *
+ * @param array $domain Row as returned by fetchDomains()
+ * @return string
+ */
+function rawPool(array $domain)
+{
+    return ($domain['php_pool'] === NULL) ? '' : $domain['php_pool'];
+}
+
+/**
+ * What pool a vhost is in, said in words.
+ *
+ * A pool an administrator has since removed from config.php is worth saying
+ * out loud: the backend will have put the vhost back in the default one.
+ *
+ * @param array $domain Row as returned by fetchDomains()
+ * @param array $pools Pool name => label
+ * @return string
+ */
+function poolLabel(array $domain, array $pools)
+{
+    $pool = rawPool($domain);
+
+    if (!array_key_exists($pool, $pools)) {
+        return tr('%s (not configured)', $pool);
+    }
+
+    return $pools[$pool];
+}
+
+/**
+ * Record where one vhost is to run, and schedule the rebuild.
+ *
+ * Version and pool are recorded together because they are applied together:
+ * a vhost lives in exactly one (version, pool) pair, and one rebuild moves it
+ * from whichever pair it was in to whichever pair it has been given.
  *
  * Two rows change: this plugin's own, which is what the backend's listeners
  * read while the vhost is being built, and the vhost's own status, which is
  * what makes i-MSCP rebuild it at all. Nothing here writes any configuration;
- * the whole point is that i-MSCP still builds the vhost and the pool, only
- * pointed at a different version.
+ * the whole point is that i-MSCP still builds the vhost and the pool file,
+ * only pointed somewhere else.
  *
  * @param array $domain Row as returned by fetchDomains()
  * @param string $version Version to run, or '' for the panel default
+ * @param string $pool Pool to run in, or '' for the default instance
  * @return void
  */
-function setVersion(array $domain, $version)
+function setChoice(array $domain, $version, $pool)
 {
     if ($domain['php_version_id'] === NULL) {
         exec_query(
             '
                 INSERT INTO php_version (
                     admin_id, domain_type, domain_id, domain_name, php_version,
-                    applied_version, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    php_pool, applied_version, applied_pool, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ',
             array(
                 $domain['admin_id'], $domain['domain_type'], $domain['domain_id'],
-                $domain['domain_name'], $version, '', 'toadd'
+                $domain['domain_name'], $version, $pool, '', '', 'toadd'
             )
         );
     } else {
         exec_query(
-            'UPDATE php_version SET php_version = ?, status = ? WHERE php_version_id = ?',
-            array($version, 'tochange', $domain['php_version_id'])
+            '
+                UPDATE php_version SET php_version = ?, php_pool = ?, status = ?
+                WHERE php_version_id = ?
+            ',
+            array($version, $pool, 'tochange', $domain['php_version_id'])
         );
     }
 
     scheduleRebuild($domain['admin_id'], $domain['domain_type'], $domain['domain_id']);
-}
-
-/**
- * Apply a version to a set of vhosts, skipping those that would not change.
- *
- * A vhost already on the wanted version is left alone rather than being
- * rebuilt for nothing, which matters when a reseller sweeps a version across
- * a few hundred domains at once.
- *
- * @param array $domains Rows as returned by fetchDomains()
- * @param string $version Version to run, or '' for the panel default
- * @return array (applied, skipped) counts
- */
-function applyVersion(array $domains, $version)
-{
-    $applied = $skipped = 0;
-
-    foreach ($domains as $domain) {
-        // A vhost the backend is mid-way through is left alone rather than
-        // having a second change stacked on top of it.
-        if (!isSettled($domain) || rawVersion($domain) === $version) {
-            $skipped++;
-            continue;
-        }
-
-        setVersion($domain, $version);
-        $applied++;
-    }
-
-    return array($applied, $skipped);
 }
 
 /**

@@ -1,9 +1,11 @@
 # i-MSCP PHP Version Plugin
 
 Lets a customer choose which of the PHP versions installed on the machine each
-of their domains runs on, and lets a reseller move any set of their customers'
-domains onto a version in one go. Versions run side by side: one domain can be
-on 7.4 while the one next to it is on 8.3.
+of their domains runs on, and which PHP-FPM pool it runs in; and lets a reseller
+move any set of their customers' domains onto a version or into a pool in one
+go. Versions and pools run side by side: one domain can be on 7.4 while the one
+next to it is on 8.3, and either can be given an FPM master of its own with
+limits nothing else on the machine shares.
 
 See [CHANGELOG](CHANGELOG.md) for what has changed in each version.
 
@@ -47,6 +49,11 @@ elsewhere has no PHP to configure.
 on. A vhost left on it follows the panel when an administrator changes the
 server's PHP version; a vhost pinned to a version stays there.
 
+Beside the version selector is a **PHP pool** selector, listing **Default** and
+whatever pools the administrator has configured. The two are chosen together and
+have their own **Set** button each, so a batch can be moved between pools without
+touching anybody's version.
+
 A reseller gets the same table at **Customers / PHP Version**, across every
 customer they own, which is where a few hundred domains get moved at once.
 
@@ -60,7 +67,13 @@ build exactly what it would otherwise have built, one version over. The vhost's
 FastCGI socket and the pool that listens on it therefore cannot disagree: they
 come from the same value.
 
-Three consequences are handled in the backend, and each is the reason for a
+A pool is the same trick one step further. The value the plugin overrides is a
+token rather than a bare version — `8.3`, or `8.3-cloudflare` — and every path
+i-MSCP derives from it follows: `/etc/php/8.3-cloudflare` for the configuration,
+its own `pool.d`, its own sockets, and `php8.3-fpm-cloudflare.service` for the
+master that reads them.
+
+Four consequences are handled in the backend, and each is the reason for a
 piece of code that would otherwise look odd:
 
 **The PHP configuration is read-only.** `phpConfig` is a tied `iMSCP::Config`
@@ -69,23 +82,71 @@ opened read-only outside of setup, so a plain assignment dies. The tie honours a
 the override lasts one domain's build and never reaches
 `/etc/imscp/php/php.data`.
 
-**Moving a domain strands its old pool.** The pool that was written under the
-previous version is still in that version's `pool.d`, and FPM would go on
-serving the vhost from it. Each row remembers the version it was last actually
-built on, which is what tells the sweep where to look. The same override is
-applied while a domain is being deleted, so `deleteDmn()` removes the pool that
-exists rather than one under the default version.
+**Moving a domain strands its old pool.** The pool file that was written under
+the previous version and pool is still in that combination's `pool.d`, and its
+master would go on serving the vhost from it. Each row remembers the version and
+the pool it was last actually built in, which is what tells the sweep where to
+look. The same override is applied while a domain is being deleted, so
+`deleteDmn()` removes the pool file that exists rather than one under the default
+version.
+
+**A pool does not exist until something builds it.** A version is already on the
+machine; a pool is not. Its configuration directory and its systemd unit are put
+in place immediately before the build that first needs them — see below.
 
 **i-MSCP masks every other PHP-FPM service.** Setup stops and masks all
 versions but its own, and only ever reloads its own. The plugin unmasks, enables
-and starts the service for each version in use, and reloads every version whose
-`pool.d` changed — including one a domain has just moved off, which has a pool
-to forget.
+and starts the service for each version and pool combination in use, and reloads
+every one whose `pool.d` changed — including one a domain has just moved off,
+which has a pool file to forget.
 
 That last reload also runs from an `END` block. `Servers::httpd`'s own `END`
 stands down when `$?` is already set, which any unrelated server failure earlier
 in the run will have done; a pool written but never loaded is a domain that does
 not run, so the reload happens either way.
+
+## Pools
+
+A pool is a second PHP-FPM master for a version: its own process manager, its own
+limits, its own `php.ini`, serving only the vhosts put into it. That is what makes
+it useful — a handful of sites behind Cloudflare with long timeouts and a fixed
+worker count, say, without those settings reaching every other site on the box.
+
+Pools are declared by the administrator in `config.php`:
+
+```php
+'pools' => array(
+    'cloudflare' => 'Cloudflare'
+)
+```
+
+The key names the service and the directory, so it must be lowercase letters,
+digits and hyphens; the value is the label the panel shows. The default instance
+— the one the distribution ships — is always offered and is not listed.
+
+The first time a vhost is put into a pool, the plugin builds it:
+
+| Written | What it is |
+|---|---|
+| `/etc/php/8.3-cloudflare/fpm/php.ini` | from i-MSCP's own template |
+| `/etc/php/8.3-cloudflare/fpm/php-fpm.conf` | its own pid file, log and `pool.d` |
+| `/etc/php/8.3-cloudflare/fpm/pool.d/www.conf` | the placeholder pool FPM insists on |
+| `/etc/systemd/system/php8.3-fpm-cloudflare.service` | from the distribution's own unit |
+
+Each is written once and **never written over again**: tuning them by hand is the
+whole point of having a pool. Delete one and the plugin builds it afresh; leave
+one and it is left alone. The unit is derived from the distribution's own so that
+whatever hardening and ordering Debian thinks an FPM master needs comes with it;
+the `php-fpm-socket-helper` hooks are dropped, since a second master must not
+fight the distribution's over the version-generic `/run/php/php-fpm.sock`.
+
+Extensions are deliberately *not* duplicated. `-c` moves only `php.ini`; the scan
+directory is compiled into the binary, so a pool loads exactly the same extensions
+as the version it belongs to, and enabling one for a version enables it for every
+pool of that version.
+
+A pool removed from `config.php` stops being offered, and any vhost still naming
+it is built in the default instance again until it is put somewhere else.
 
 ## PHP configuration for the additional versions
 
@@ -97,11 +158,22 @@ therefore generates the same three files, from i-MSCP's own templates, for each
 version the first time it sees it. Set `sync_php_conf` to `false` in
 `config.php` to leave those files alone.
 
+That switch covers versions only. A pool has no configuration at all until the
+plugin writes it, so turning the switch off cannot stop a pool being built — it
+would only leave one that could not start.
+
 ## Removing the plugin
 
-Disabling puts every domain back on the panel's default version and sweeps the
-pools it created, while keeping each choice recorded, so re-enabling restores
-them. Uninstalling additionally stops and re-masks the services it woke up.
+Disabling puts every domain back on the panel's default version, in the default
+instance, and sweeps the pool files it created, while keeping each choice
+recorded, so re-enabling restores them. Uninstalling additionally stops and
+disables the services it woke up, pool masters included.
+
+What uninstalling does **not** remove is the `/etc/php/<version>-<pool>`
+directories and the `/etc/systemd/system/php<version>-fpm-<pool>.service` units.
+They have been tuned by hand by then, and an administrator who reinstalls the
+plugin should find them as they were left. Delete them yourself if you want them
+gone.
 
 ## Caveats
 
@@ -119,35 +191,37 @@ version change rather than an outage.
 The `tools/` and `test/` directories are development-only and are excluded from
 the release archive.
 
+The i-MSCP repository next door runs a Debian container with systemd as PID 1,
+with this working tree mounted and symlinked into the panel's plugins directory.
+There is no deploy step: an edit on the host is live in the container.
+
 ```shell
-# In the i-MSCP repository, bring up the Debian 13 box:
-cd imscp/Vagrant && vagrant up imscp_debian_trixie --provider=libvirt
-
-# Inside the box: deploy the plugin
-sudo /usr/local/src/imscp-php-version/tools/deploy.sh
+# In the i-MSCP repository:
+docker/imscp up
+docker/imscp exec systemctl restart imscp_panel   # the panel's opcache
 ```
-
-`deploy.sh` copies the working tree into the panel's plugins directory rather
-than mounting it there, because the virtiofs share carries the host's uid and
-the panel runs as `vu2000`. It restarts `imscp_panel` afterwards, since that
-pool's opcache would otherwise keep serving the previous version of a file.
 
 Then either use *Settings / Plugins* in the panel, or drive the same plugin
 manager from the command line:
 
 ```shell
-sudo -u vu2000 php /usr/local/src/imscp-php-version/tools/plugin-ctl.php sync
-sudo -u vu2000 php .../plugin-ctl.php install SGW_PhpVersion
-sudo perl /var/www/imscp/engine/imscp-rqst-mngr
-sudo -u vu2000 php .../plugin-ctl.php status
+P=/var/www/imscp-plugins/imscp-php-version/tools/plugin-ctl.php
+docker/imscp exec sudo -u vu2000 php $P sync
+docker/imscp exec sudo -u vu2000 php $P install SGW_PhpVersion
+docker/imscp exec perl /var/www/imscp/engine/imscp-rqst-mngr
+docker/imscp exec sudo -u vu2000 php $P status
 ```
+
+`tools/deploy.sh` is for the older Vagrant box, which has no such mount: it
+copies the working tree in, because the virtiofs share carries the host's uid
+while the panel runs as `vu2000`.
 
 Tests:
 
 ```shell
-# Version selection and the override bracket, no live panel needed. Must run as
-# root: the module pulls in iMSCP::* from the engine, whose directory is not
-# world readable.
+# Version and pool selection, the naming, and the override bracket; no live
+# panel needed. Must run as root: the module pulls in iMSCP::* from the engine,
+# whose directory is not world readable.
 cd test/backend && sudo perl all.t
 
 # End to end against a live panel: moves every vhost of a customer onto each
