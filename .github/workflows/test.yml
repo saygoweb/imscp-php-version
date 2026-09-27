@@ -1,0 +1,24 @@
+name: Test
+
+# Runs the tests on an installed i-MSCP server, booted from the CI image that
+# saygoweb/imscp publishes; see that repository's
+# .github/workflows/plugin-test.yml. Locally, the same run is
+#
+#   ../imscp/docker/ci/plugin-test.sh .. imscp-php-version -- 'cd test/backend && perl all.t'
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test:
+    uses: saygoweb/imscp/.github/workflows/plugin-test.yml@main
+    with:
+      test: cd test/backend && perl all.t
