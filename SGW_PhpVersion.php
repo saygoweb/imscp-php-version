@@ -73,7 +73,12 @@ class SGW_PhpVersion extends AbstractPlugin
                 // under a non-default version, with it.
                 Events::onAfterDeleteDomainAlias,
                 Events::onAfterDeleteSubdomain,
-                Events::onAfterDeleteCustomer
+                Events::onAfterDeleteCustomer,
+                // Written as a string literal, not a constant of the
+                // SGW_GraphQL plugin's ExtensionRegistry class: this plugin
+                // must load no class of that one unless it is installed and
+                // dispatching, so that it works exactly the same without it.
+                'onGraphQLRegisterExtensions'
             ),
             $this
         );
@@ -205,6 +210,20 @@ class SGW_PhpVersion extends AbstractPlugin
                 $event->getParam('subdomainId')
             )
         );
+    }
+
+    /**
+     * onGraphQLRegisterExtensions event listener
+     *
+     * Only ever called when the SGW_GraphQL plugin is installed and serving a
+     * request, so this is the only place this plugin touches a GraphQL class.
+     *
+     * @param Event $event
+     * @return void
+     */
+    public function onGraphQLRegisterExtensions(Event $event)
+    {
+        $event->getParam('registry')->register(new GraphQL\PhpVersionExtension());
     }
 
     /**

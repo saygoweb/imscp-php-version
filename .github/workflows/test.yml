@@ -2,9 +2,17 @@ name: Test
 
 # Runs the tests on an installed i-MSCP server, booted from the CI image that
 # saygoweb/imscp publishes; see that repository's
-# .github/workflows/plugin-test.yml. Locally, the same run is
+# .github/workflows/plugin-test.yml. Locally, the same runs are
 #
 #   ../imscp/docker/ci/plugin-test.sh .. imscp-php-version -- 'cd test/backend && perl all.t'
+#
+#   ../imscp/docker/ci/plugin-test.sh --setup '
+#       [ -f /var/www/imscp-plugins/imscp-graphql/vendor/autoload.php ] || {
+#           git clone --depth 1 https://github.com/saygoweb/imscp-graphql.git /var/www/imscp-plugins/imscp-graphql &&
+#           cd /var/www/imscp-plugins/imscp-graphql &&
+#           php7.4 /var/www/imscp/gui/bin/composer.phar install --no-interaction --no-progress
+#       }' .. imscp-php-version -- \
+#       'php7.4 /var/www/imscp-plugins/imscp-graphql/vendor/bin/phpunit -c test/graphql/phpunit.xml --do-not-cache-result'
 
 on:
   pull_request:
@@ -22,3 +30,22 @@ jobs:
     uses: saygoweb/imscp/.github/workflows/plugin-test.yml@main
     with:
       test: cd test/backend && perl all.t
+
+  graphql:
+    # The GraphQL extension's own suite: it runs the SGW_GraphQL plugin's own
+    # PHPUnit against the real PhpVersionExtension, so it needs that plugin's
+    # checkout and Composer dependencies beside this one - the same idempotent
+    # clone the imscp-graphql project itself is public for, since this repo's
+    # CI image holds only this plugin. It also needs this plugin actually
+    # installed (install: true, the default): the fixture's schema check
+    # expects php_version's tables, which install() migrates in, and the
+    # resolvers read the plugin's own config.php-seeded pools.
+    uses: saygoweb/imscp/.github/workflows/plugin-test.yml@main
+    with:
+      setup: |
+        [ -f /var/www/imscp-plugins/imscp-graphql/vendor/autoload.php ] || {
+            git clone --depth 1 https://github.com/saygoweb/imscp-graphql.git /var/www/imscp-plugins/imscp-graphql &&
+            cd /var/www/imscp-plugins/imscp-graphql &&
+            php7.4 /var/www/imscp/gui/bin/composer.phar install --no-interaction --no-progress
+        }
+      test: php7.4 /var/www/imscp-plugins/imscp-graphql/vendor/bin/phpunit -c test/graphql/phpunit.xml --do-not-cache-result

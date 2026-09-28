@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+* Added GraphQL support: if the SGW_GraphQL plugin is installed, a domain's
+  PHP version and pool are readable on `Domain`, `Subdomain` and
+  `DomainAlias`, the installed versions and configured pools are readable
+  through `Query.phpVersions`, and both can be changed through
+  `Mutation.phpVersionSet` -- validated exactly as the client and reseller
+  pages validate a submission, and reusing their `setChoice()`/`fetchDomain()`
+  logic rather than duplicating it. This plugin still works exactly as before
+  when SGW_GraphQL is not installed.
+
 ## 0.2.1
 
 * Fixed the reseller page returning a fatal error, rather than a bad request,
