@@ -162,6 +162,60 @@ That switch covers versions only. A pool has no configuration at all until the
 plugin writes it, so turning the switch off cannot stop a pool being built — it
 would only leave one that could not start.
 
+## GraphQL
+
+If [SGW_GraphQL](https://github.com/saygoweb/imscp-graphql) is installed, this
+plugin adds a domain's PHP version and pool to its API — no setup beyond
+having both plugins enabled; this plugin never touches a GraphQL class unless
+SGW_GraphQL is asking it to.
+
+Reading what a `Domain`, `Subdomain` or `DomainAlias` is set to run:
+
+```graphql
+query {
+  node(id: "RG9tYWluOjE") {
+    ... on Domain {
+      phpVersion {
+        version         # '' follows the panel default
+        appliedVersion  # what the backend last actually built; '' before the first apply
+        pool            # '' is the default PHP-FPM instance
+        appliedPool
+        provisioning { state settled }
+      }
+    }
+  }
+}
+```
+
+`phpVersion` is `null` when nobody has ever set a choice for that vhost: it is
+simply following the panel default, in the default pool.
+
+The versions and pools available to choose from:
+
+```graphql
+query {
+  phpVersions {
+    versions { version isDefault }
+    pools { name label }
+  }
+}
+```
+
+Changing a vhost's version or pool — `FEATURE_UNAVAILABLE` when its domain
+does not run PHP, `CONFLICT` while either the vhost or a previous choice on it
+is still being applied, `BAD_USER_INPUT` for a version that is not installed
+or a pool that is not configured:
+
+```graphql
+mutation {
+  phpVersionSet(input: { id: "RG9tYWluOjE", version: "8.3", pool: "cloudflare" }) {
+    name
+    provisioning { state }
+    ... on Domain { phpVersion { version pool } }
+  }
+}
+```
+
 ## Removing the plugin
 
 Disabling puts every domain back on the panel's default version, in the default

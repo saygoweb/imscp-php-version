@@ -20,16 +20,79 @@
 
 namespace SGW_PhpVersion;
 
+use InvalidArgumentException;
 use PDO;
 
 /**
- * Every vhost owned by the customers the given condition picks out.
+ * One arm of the four-way vhost union, with $condition spliced onto it.
  *
- * i-MSCP keeps the four vhost kinds in four tables; the version rows are keyed
- * by the same (type, id) pair i-MSCP itself uses, so one union gives the whole
- * picture including alias subdomains. The condition is spliced into each arm
- * of the union rather than applied afterwards, so that a reseller's page and a
- * customer's page differ by their WHERE clause alone.
+ * i-MSCP keeps the four vhost kinds in four tables, differing in almost
+ * nothing but their column names; this is where that shape is written out
+ * once, so that fetchDomains() (many vhosts, one owner condition) and
+ * fetchDomain() (one vhost, its own primary key) share the same columns, the
+ * same joins and the same domain_php rule instead of a copy each.
+ *
+ * $condition is spliced in as-is, so it must name whichever alias makes sense
+ * for the caller: `d.domain_admin_id = ?` for an owner, or the vhost's own
+ * primary key column (`s.subdomain_id = ?`, ...) for a single lookup.
+ *
+ * @param string $kind One of dmn, sub, als, alssub
+ * @param string $condition SQL predicate, its placeholders bound once
+ * @return string
+ * @throws InvalidArgumentException
+ */
+function vhostArm($kind, $condition)
+{
+    switch ($kind) {
+        case 'dmn':
+            return "
+                SELECT 'dmn' AS domain_type, d.domain_id AS domain_id,
+                    d.domain_admin_id AS admin_id,
+                    d.domain_name AS domain_name, d.domain_status AS domain_status,
+                    d.url_forward AS url_forward
+                FROM domain AS d
+                WHERE d.domain_php = 'yes' AND ($condition)
+            ";
+        case 'sub':
+            return "
+                SELECT 'sub' AS domain_type, s.subdomain_id AS domain_id,
+                    d.domain_admin_id AS admin_id,
+                    CONCAT(s.subdomain_name, '.', d.domain_name) AS domain_name,
+                    s.subdomain_status AS domain_status,
+                    s.subdomain_url_forward AS url_forward
+                FROM subdomain AS s
+                JOIN domain AS d USING(domain_id)
+                WHERE d.domain_php = 'yes' AND ($condition)
+            ";
+        case 'als':
+            return "
+                SELECT 'als' AS domain_type, a.alias_id AS domain_id,
+                    d.domain_admin_id AS admin_id,
+                    a.alias_name AS domain_name, a.alias_status AS domain_status,
+                    a.url_forward AS url_forward
+                FROM domain_aliasses AS a
+                JOIN domain AS d USING(domain_id)
+                WHERE d.domain_php = 'yes' AND ($condition)
+            ";
+        case 'alssub':
+            return "
+                SELECT 'alssub' AS domain_type, sa.subdomain_alias_id AS domain_id,
+                    d.domain_admin_id AS admin_id,
+                    CONCAT(sa.subdomain_alias_name, '.', a.alias_name) AS domain_name,
+                    sa.subdomain_alias_status AS domain_status,
+                    sa.subdomain_alias_url_forward AS url_forward
+                FROM subdomain_alias AS sa
+                JOIN domain_aliasses AS a USING(alias_id)
+                JOIN domain AS d USING(domain_id)
+                WHERE d.domain_php = 'yes' AND ($condition)
+            ";
+        default:
+            throw new InvalidArgumentException("Unknown vhost kind '$kind'.");
+    }
+}
+
+/**
+ * Every vhost owned by the customers the given condition picks out.
  *
  * Only customers whose reseller has given them PHP appear at all: without PHP
  * there is no version to choose.
@@ -45,39 +108,13 @@ function fetchDomains($ownerCondition, array $params)
             p.php_version_id, p.php_version, p.php_pool,
             p.applied_version, p.applied_pool, p.status
         FROM (
-            SELECT 'dmn' AS domain_type, d.domain_id AS domain_id,
-                d.domain_admin_id AS admin_id,
-                d.domain_name AS domain_name, d.domain_status AS domain_status,
-                d.url_forward AS url_forward
-            FROM domain AS d
-            WHERE d.domain_php = 'yes' AND ($ownerCondition)
-
+            " . vhostArm('dmn', $ownerCondition) . "
             UNION ALL
-
-            SELECT 'sub', s.subdomain_id, d.domain_admin_id,
-                CONCAT(s.subdomain_name, '.', d.domain_name), s.subdomain_status,
-                s.subdomain_url_forward
-            FROM subdomain AS s
-            JOIN domain AS d USING(domain_id)
-            WHERE d.domain_php = 'yes' AND ($ownerCondition)
-
+            " . vhostArm('sub', $ownerCondition) . "
             UNION ALL
-
-            SELECT 'als', a.alias_id, d.domain_admin_id,
-                a.alias_name, a.alias_status, a.url_forward
-            FROM domain_aliasses AS a
-            JOIN domain AS d USING(domain_id)
-            WHERE d.domain_php = 'yes' AND ($ownerCondition)
-
+            " . vhostArm('als', $ownerCondition) . "
             UNION ALL
-
-            SELECT 'alssub', sa.subdomain_alias_id, d.domain_admin_id,
-                CONCAT(sa.subdomain_alias_name, '.', a.alias_name),
-                sa.subdomain_alias_status, sa.subdomain_alias_url_forward
-            FROM subdomain_alias AS sa
-            JOIN domain_aliasses AS a USING(alias_id)
-            JOIN domain AS d USING(domain_id)
-            WHERE d.domain_php = 'yes' AND ($ownerCondition)
+            " . vhostArm('alssub', $ownerCondition) . "
         ) AS v
         JOIN admin AS ad ON ad.admin_id = v.admin_id
         LEFT JOIN php_version AS p
@@ -90,6 +127,47 @@ function fetchDomains($ownerCondition, array $params)
     return array_values(array_filter(
         $stmt->fetchAll(PDO::FETCH_ASSOC), __NAMESPACE__ . '\runsPhp'
     ));
+}
+
+/**
+ * The single vhost the panel identifies by (type, id), in the same shape
+ * fetchDomains() returns one row of, or NULL when it does not exist, does not
+ * run PHP (whether because its domain lacks the feature or because it is a
+ * forwarding vhost with no PHP handler of its own), or is of an unknown kind.
+ *
+ * The GraphQL extension is handed a vhost the API has already resolved,
+ * rather than an owner to list by, so it reads a single row through this
+ * rather than fetchDomains() and a search.
+ *
+ * @param string $kind One of dmn, sub, als, alssub
+ * @param int $id The vhost's own id, within its kind's table
+ * @return array|null
+ */
+function fetchDomain($kind, $id)
+{
+    $primaryKey = array(
+        'dmn'    => 'd.domain_id',
+        'sub'    => 's.subdomain_id',
+        'als'    => 'a.alias_id',
+        'alssub' => 'sa.subdomain_alias_id'
+    );
+
+    if (!isset($primaryKey[$kind])) {
+        return NULL;
+    }
+
+    $sql = "
+        SELECT v.*, p.php_version_id, p.php_version, p.php_pool,
+            p.applied_version, p.applied_pool, p.status
+        FROM (" . vhostArm($kind, $primaryKey[$kind] . ' = ?') . ") AS v
+        LEFT JOIN php_version AS p
+            ON p.domain_type = v.domain_type AND p.domain_id = v.domain_id
+    ";
+
+    $stmt = exec_query($sql, array($id));
+    $row = $stmt->fetchRow(PDO::FETCH_ASSOC);
+
+    return ($row && runsPhp($row)) ? $row : NULL;
 }
 
 /**
