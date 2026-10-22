@@ -5,3 +5,4 @@ SGW_*.zip
 *.zip
 log/
 .claude/
+coverage/
