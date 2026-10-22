@@ -1,5 +1,8 @@
 # i-MSCP PHP Version Plugin
 
+[![Test](https://github.com/saygoweb/imscp-php-version/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/saygoweb/imscp-php-version/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/saygoweb/imscp-php-version/branch/main/graph/badge.svg)](https://codecov.io/gh/saygoweb/imscp-php-version)
+
 Lets a customer choose which of the PHP versions installed on the machine each
 of their domains runs on, and which PHP-FPM pool it runs in; and lets a reseller
 move any set of their customers' domains onto a version or into a pool in one
