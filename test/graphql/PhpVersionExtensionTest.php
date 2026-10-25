@@ -258,7 +258,7 @@ class PhpVersionExtensionTest extends AuthzTestCase
         foreach ($result['data']['phpVersions']['pools'] as $row) {
             $pools[$row['name']] = $row['label'];
         }
-        self::assertSame(array('' => 'Default', 'cloudflare' => 'Cloudflare'), $pools);
+        self::assertSame(array('' => 'Default', 'cloudflare' => 'Cloudflare', 'chat' => 'Chat (streaming)'), $pools);
     }
 
     // ---- the mutation's happy path -------------------------------------

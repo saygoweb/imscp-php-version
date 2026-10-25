@@ -151,6 +151,126 @@ pool of that version.
 A pool removed from `config.php` stops being offered, and any vhost still naming
 it is built in the default instance again until it is put somewhere else.
 
+## Chat (streaming) pool
+
+A pool can also carry settings, for an application whose requests need
+something the rest of the machine does not. The one shipped is `chat`, for an
+application that streams [Server-Sent
+Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events):
+each request holds a worker for minutes, and every event has to reach the
+browser the moment PHP flushes it.
+
+```php
+'pools' => array(
+    'cloudflare' => 'Cloudflare',
+    'chat'       => array(
+        'label'   => 'Chat (streaming)',
+        'proxy'   => array('flushpackets' => 'on', 'timeout' => 600),
+        'fpm'     => array(
+            'pm'                        => 'dynamic',
+            'pm.max_children'           => 24,
+            'pm.start_servers'          => 4,
+            'pm.min_spare_servers'      => 2,
+            'pm.max_spare_servers'      => 6,
+            'request_terminate_timeout' => '300s'
+        ),
+        'php_ini' => array('output_buffering' => '0', 'zlib.output_compression' => 'Off')
+    )
+)
+```
+
+A pool given as a string is a label and nothing else, exactly as before. An
+array needs a `label`, and may have any of:
+
+| Setting | Applied to | Keys |
+|---|---|---|
+| `proxy` | the `ProxySet` line in the vhost's PHP-FPM `<Proxy>` block, HTTP and HTTPS | `flushpackets` (`on`, `off`, `auto`), `flushwait` (ms), `timeout` (s) |
+| `fpm` | the vhost's own FPM pool file | `pm`, `pm.max_children`, `pm.start_servers`, `pm.min_spare_servers`, `pm.max_spare_servers`, `pm.max_spawn_rate`, `pm.max_requests`, `pm.process_idle_timeout`, `request_terminate_timeout`, `request_slowlog_timeout` |
+| `php_ini` | the pool's `php.ini`, once, when the plugin first writes it | any directive name, with a one-line value |
+
+What each of the shipped values is for:
+
+* **`flushpackets=on`** makes Apache's `mod_proxy_fcgi` pass each piece of
+  output on as soon as PHP-FPM sends it. Without it Apache fills its own buffer
+  first, and a stream of small events arrives in bursts many seconds apart. The
+  probe below shows this: with `flushpackets` removed by hand, the first event
+  took 15 s to arrive even with `output_buffering = 0`. It is required, not just
+  a precaution.
+* **`timeout=600`** is how long Apache waits on PHP-FPM for more output. It must
+  be longer than the longest request the application allows.
+* **`pm.max_children = 24`** and the `dynamic` manager: every open stream holds
+  a worker for its whole length, and i-MSCP's default of 6 `ondemand` workers is
+  used up by a handful of streams, leaving nothing for the rest of the site.
+* **`request_terminate_timeout = 300s`** lets a request run for five minutes of
+  wall time. `max_execution_time`, which i-MSCP locks with `php_admin_value`, is
+  left alone: on Linux it counts CPU time, and a stream waiting on the network
+  uses almost none of it.
+* **`output_buffering = 0`** and **`zlib.output_compression = Off`**, so that
+  nothing in PHP holds output back either.
+
+The application must still do its part: send `Content-Type: text/event-stream`,
+end any output buffers it has started, and call `flush()` after each event.
+
+Nothing else about the vhost changes. Its `open_basedir`, `session.save_path`,
+`display_errors`, `Authorization` header passthrough and rewrites are i-MSCP's
+as usual: `fpm` cannot name `php_value` or `php_admin_value`, and nothing
+outside the `<Proxy>` block's `ProxySet` line is edited.
+
+**Moving a vhost in and out.** Choose *Chat (streaming)* as its pool, on the
+customer's or reseller's page or through `phpVersionSet`, like any other pool.
+`proxy` and `fpm` are applied every time a vhost in the pool is built. When it
+is moved back to *Default*, or to any other pool, its next build renders i-MSCP's
+stock vhost and pool file, with no trace of them. A change to `proxy` or `fpm` in
+`config.php` reaches every vhost in the pool the next time the plugin is
+enabled, which is what changing its configuration does.
+
+**`php_ini` is seeded once.** Like everything else in a pool's directory,
+`/etc/php/<version>-chat/fpm/php.ini` is written once and left alone after that,
+so a change to `php_ini` does not reach a pool that already exists. To seed it
+again, delete the file and rebuild a vhost in the pool:
+
+```shell
+rm /etc/php/8.3-chat/fpm/php.ini
+# then put any vhost in the pool through a rebuild, e.g. Apply it on its page
+```
+
+**An invalid definition is refused.** A missing label, an unknown key, a value
+that is not allowed or that contains a line break: the plugin refuses to
+install, update or enable, and the message names the pool and the key, e.g.
+
+```
+The 'chat' pool in the SGW_PhpVersion plugin's config.php is invalid: fpm key
+'php_admin_value[open_basedir]' is not allowed (allowed: pm, pm.max_children, ...)
+```
+
+Until the definition is put right, the pool is not offered, and a vhost already
+in it is built in the default instance with stock files, never with half of what
+was asked for. Because the failed change is still pending, the panel will not
+take the corrected `config.php` straight away. Clear the error, then
+synchronise the plugins again:
+
+```shell
+mysql imscp -e "UPDATE plugin SET plugin_status = 'enabled', plugin_error = NULL WHERE plugin_name = 'SGW_PhpVersion'"
+# then Settings / Plugins / Update plugin list
+```
+
+**Checking a vhost streams.** `test/sse-probe.php` sends an event every 500 ms,
+each reporting the SAPI and the `output_buffering` and `max_execution_time` it
+ran with. `test/sse-probe.sh` reads it, timestamps every event as it arrives,
+and fails if the first takes over a second, if any two are more than a second
+apart (bunching), or if any are missing. Copy the PHP file into the vhost's
+document root, run the probe from anywhere, then delete the file again:
+
+```shell
+test/sse-probe.sh https://qa.example.com/sse-probe.php 180
+# In the development container, through the published port:
+test/sse-probe.sh http://localhost:8080/sse-probe.php 180 -H 'Host: chat.cust1.test'
+```
+
+Closing the client part way through is noticed by the probe within a few
+writes. Apache only gives up on PHP-FPM once a write to the client fails. The
+probe logs it to `sse-probe.log` beside itself.
+
 ## PHP configuration for the additional versions
 
 i-MSCP builds its `php.ini`, `php-fpm.conf` and default pool only for the
