@@ -280,17 +280,114 @@ function pools()
             ->getConfigParam('pools', array());
 
         if (is_array($configured)) {
-            foreach ($configured as $name => $label) {
+            foreach ($configured as $name => $definition) {
                 // A pool name ends up in a service name and a directory name,
-                // so anything that would not survive both is not offered.
-                if (preg_match('/^[a-z0-9][a-z0-9-]*$/', $name)) {
-                    $pools[$name] = $label;
+                // so anything that would not survive both is not offered; nor
+                // is a definition the backend would refuse to build.
+                if (preg_match('/^[a-z0-9][a-z0-9-]*$/', $name)
+                    && NULL === poolDefinitionError($definition)
+                ) {
+                    $pools[$name] = is_array($definition) ? $definition['label'] : $definition;
                 }
             }
         }
     }
 
     return $pools;
+}
+
+/**
+ * What is wrong with one pool's definition in config.php, if anything.
+ *
+ * The same rules the backend's _parsePool() applies, so that a pool it would
+ * build in the default instance instead is never offered here. A pool is a
+ * label alone, or an array of a label and any of proxy, fpm and php_ini.
+ *
+ * @param mixed $definition
+ * @return string|null Why it is invalid, or NULL when it is valid
+ */
+function poolDefinitionError($definition)
+{
+    $scalar = function ($what, $value) {
+        if (!is_string($value) && !is_int($value) && !is_float($value)) {
+            return "$what must be a string or a number";
+        }
+
+        return preg_match('/[\r\n\0]/', (string)$value) ? "$what must not contain a line break" : NULL;
+    };
+
+    if (!is_array($definition)) {
+        return $scalar('the label', $definition);
+    }
+
+    foreach (array_keys($definition) as $key) {
+        if (!in_array($key, array('label', 'proxy', 'fpm', 'php_ini'), true)) {
+            return "'$key' is not a pool setting (label, proxy, fpm, php_ini)";
+        }
+    }
+
+    if (!isset($definition['label'])) {
+        return "'label' is required";
+    }
+
+    if (NULL !== ($error = $scalar("'label'", $definition['label']))) {
+        return $error;
+    }
+
+    if ('' === (string)$definition['label']) {
+        return "'label' must not be empty";
+    }
+
+    $allowed = array(
+        'proxy' => array(
+            'flushpackets' => '/^(?:on|off|auto)$/',
+            'flushwait'    => '/^[0-9]+$/',
+            'timeout'      => '/^[0-9]+$/'
+        ),
+        'fpm'   => array(
+            'pm'                        => '/^(?:static|dynamic|ondemand)$/',
+            'pm.max_children'           => '/^[0-9]+$/',
+            'pm.start_servers'          => '/^[0-9]+$/',
+            'pm.min_spare_servers'      => '/^[0-9]+$/',
+            'pm.max_spare_servers'      => '/^[0-9]+$/',
+            'pm.max_spawn_rate'         => '/^[0-9]+$/',
+            'pm.max_requests'           => '/^[0-9]+$/',
+            'pm.process_idle_timeout'   => '/^[0-9]+[smhd]?$/',
+            'request_terminate_timeout' => '/^[0-9]+[smhd]?$/',
+            'request_slowlog_timeout'   => '/^[0-9]+[smhd]?$/'
+        )
+    );
+
+    foreach (array('proxy', 'fpm', 'php_ini') as $section) {
+        $settings = isset($definition[$section]) ? $definition[$section] : array();
+
+        if (!is_array($settings)) {
+            return "'$section' must be an array of settings";
+        }
+
+        foreach ($settings as $key => $value) {
+            if (isset($allowed[$section])) {
+                if (!isset($allowed[$section][$key])) {
+                    return sprintf(
+                        "%s key '%s' is not allowed (allowed: %s)",
+                        $section, $key, implode(', ', array_keys($allowed[$section]))
+                    );
+                }
+            } elseif (!preg_match('/^[A-Za-z0-9_.]+$/', $key)) {
+                return "php_ini key '$key' is not an ini directive name";
+            }
+
+            if (NULL !== ($error = $scalar("$section key '$key'", $value))) {
+                return $error;
+            }
+
+            if (isset($allowed[$section]) && !preg_match($allowed[$section][$key], (string)$value)) {
+                return "$section key '$key' cannot be '$value'";
+            }
+        }
+    }
+
+    return NULL;
 }
 
 /**

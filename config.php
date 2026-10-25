@@ -46,7 +46,40 @@ return array(
     // The plugin creates the directory and the service for a pool the first
     // time it is needed and never writes over either again: from there on they
     // are yours to tune.
+    //
+    // A pool may also be an array: a 'label', plus any of
+    //
+    //   'proxy'   => the vhost's FastCGI ProxySet: flushpackets (on|off|auto),
+    //                flushwait (ms) and timeout (s).
+    //   'fpm'     => the vhost's FPM pool file: pm, pm.max_children,
+    //                pm.start_servers, pm.min_spare_servers, pm.max_spare_servers,
+    //                pm.max_spawn_rate, pm.max_requests, pm.process_idle_timeout,
+    //                request_terminate_timeout and request_slowlog_timeout.
+    //   'php_ini' => directives seeded into the pool's php.ini when the plugin
+    //                first writes it; never applied to one already there.
+    //
+    // proxy and fpm are applied every time a vhost in the pool is built, and are
+    // gone again the first time it is built anywhere else. A definition the
+    // plugin cannot accept stops it installing, updating or enabling, naming the
+    // pool and the key. See "Chat (streaming) pool" in the README.
     'pools' => array(
-        'cloudflare' => 'Cloudflare'
+        'cloudflare' => 'Cloudflare',
+
+        // For an application that streams Server-Sent Events: each request
+        // holds a worker for minutes and every event must reach the browser as
+        // it is flushed.
+        'chat'       => array(
+            'label'   => 'Chat (streaming)',
+            'proxy'   => array('flushpackets' => 'on', 'timeout' => 600),
+            'fpm'     => array(
+                'pm'                        => 'dynamic',
+                'pm.max_children'           => 24,
+                'pm.start_servers'          => 4,
+                'pm.min_spare_servers'      => 2,
+                'pm.max_spare_servers'      => 6,
+                'request_terminate_timeout' => '300s'
+            ),
+            'php_ini' => array('output_buffering' => '0', 'zlib.output_compression' => 'Off')
+        )
     )
 );

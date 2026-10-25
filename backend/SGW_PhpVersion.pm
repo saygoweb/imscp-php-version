@@ -87,6 +87,7 @@ sub install
     my ($self) = @_;
 
     my $rs = $self->_checkRequirements();
+    $rs ||= $self->_checkPools();
     $rs ||= $self->_refreshInstalledVersions();
     $rs;
 }
@@ -104,6 +105,7 @@ sub update
     my ($self) = @_;
 
     my $rs = $self->_checkRequirements();
+    $rs ||= $self->_checkPools();
     $rs ||= $self->_refreshInstalledVersions();
     $rs;
 }
@@ -129,6 +131,7 @@ sub enable
     $self->{'forceDefault'} = 0;
 
     my $rs = $self->_checkRequirements();
+    $rs ||= $self->_checkPools();
     $rs ||= $self->_refreshInstalledVersions();
     return $rs if $rs;
 
@@ -312,6 +315,13 @@ sub _init
 
     $events->register( 'beforeHttpdRestart', sub { $self->_onBeforeHttpdRestart( @_ ); } );
 
+    # A pool may carry settings for the vhost's FastCGI proxy and for its FPM
+    # pool file. Both files are rendered from i-MSCP's own templates inside the
+    # bracket above, so they are adjusted as text on the way to disk rather than
+    # from a template of the plugin's own. Registered after the httpd server's
+    # own template cleaner, which therefore runs first.
+    $events->register( 'afterHttpdBuildConfFile', sub { $self->_onAfterBuildConfFile( @_ ); } );
+
     $self->{'active'} = 1;
     $self;
 }
@@ -345,9 +355,179 @@ sub _onBeforeBuildDmn
     my $rs = $self->_ensurePool( $version, $pool );
     return $rs if $rs;
 
-    $self->{'current'} = { row => $row, version => $version, pool => $pool };
+    $self->{'current'} = {
+        row => $row, version => $version, pool => $pool, building => 1
+    };
     $self->_pushVersion( $version, $pool );
     0;
+}
+
+=item _onAfterBuildConfFile( \$cfgTpl, $filename, \%data, \%options )
+
+ Apply the proxy and FPM settings of the pool the vhost being built is in
+
+ Only the vhost and pool files of the vhost inside the build bracket are ever
+ touched, and only when its pool says something about them. Every other file --
+ a vhost in the default instance, or in a pool that is a label alone -- reaches
+ disk exactly as i-MSCP rendered it. Leaving a pool needs nothing undone: the
+ next build renders the stock files and nothing here edits them.
+
+ Return int 0
+
+=cut
+
+sub _onAfterBuildConfFile
+{
+    my ($self, $cfgTpl, $filename) = @_;
+
+    my $ctx = $self->{'current'} or return 0;
+    return 0 unless $ctx->{'building'} && length $ctx->{'pool'};
+
+    my $pool = $self->_poolDefinitions()->{'pools'}->{ $ctx->{'pool'} } or return 0;
+
+    if ( $filename eq 'domain.tpl' && %{ $pool->{'proxy'} } ) {
+        ${ $cfgTpl } = _tuneVhost( ${ $cfgTpl }, $pool->{'proxy'} );
+    } elsif ( $filename eq 'pool.conf' && %{ $pool->{'fpm'} } ) {
+        ${ $cfgTpl } = _tuneFpmPool(
+            ${ $cfgTpl }, $pool->{'fpm'}, _token( $ctx->{'version'}, $ctx->{'pool'} )
+        );
+    }
+
+    0;
+}
+
+=item _tuneVhost( $text, \%proxy )
+
+ Set the given keys on the ProxySet line of a vhost's PHP-FPM <Proxy> block
+
+ Only the block that proxies to FastCGI is touched; a forwarding vhost has none
+ and comes back unchanged. A key already on the line has its value replaced in
+ place and a missing one is added at the end, so applying the same settings
+ twice gives the same text.
+
+ Return string
+
+=cut
+
+sub _tuneVhost
+{
+    my ($text, $proxy) = @_;
+
+    $text =~ s{
+        ( ^[ \t]*<Proxy\s+"[^"\n]*fcgi://[^"\n]*"[^>\n]*>[ \t]*\n )
+        ( .*? )
+        ( ^([ \t]*)</Proxy> )
+    }{ $1 . _tuneProxyBody( $2, $proxy, $4 ) . $3 }gmsex;
+
+    $text;
+}
+
+=item _tuneProxyBody( $body, \%proxy, $indent )
+
+ The body of a <Proxy> block with the given keys set on its ProxySet line
+
+ Return string
+
+=cut
+
+sub _tuneProxyBody
+{
+    my ($body, $proxy, $indent) = @_;
+
+    my @keys = sort keys %{ $proxy };
+
+    my $tune = sub {
+        my ($lead, $args) = @_;
+        my @tokens = split ' ', $args;
+
+        for my $key ( @keys ) {
+            my $set = "$key=$proxy->{$key}";
+            my $found = 0;
+            for ( @tokens ) {
+                next unless /^\Q$key\E=/i;
+                $_ = $set;
+                $found = 1;
+            }
+            push @tokens, $set unless $found;
+        }
+
+        "${lead}ProxySet " . join( ' ', @tokens );
+    };
+
+    return $body if $body =~ s/^([ \t]*)ProxySet[ \t]+([^\n]*?)[ \t]*$/$tune->( $1, $2 )/me;
+
+    $body . $tune->( "$indent    ", '' ) . "\n";
+}
+
+=item _tuneFpmPool( $text, \%fpm, $token )
+
+ Set the given directives in a vhost's FPM pool file
+
+ FPM refuses to start a pool that has a request_slowlog_timeout but nowhere to
+ write the backtraces, so a slow log is given along with one unless the pool
+ names its own.
+
+ Return string
+
+=cut
+
+sub _tuneFpmPool
+{
+    my ($text, $fpm, $token) = @_;
+
+    my %directives = %{ $fpm };
+
+    if ( exists $directives{'request_slowlog_timeout'}
+        && $directives{'request_slowlog_timeout'} !~ /^0+[smhd]?$/
+    ) {
+        $directives{'slowlog'} = "/var/log/php$token-fpm.\$pool.slow.log";
+    }
+
+    _setDirectives( $text, \%directives );
+}
+
+=item _setDirectives( $text, \%directives )
+
+ Set directives in an INI-style file -- a php.ini or an FPM pool file
+
+ A directive that is already set has every active line for it replaced. One
+ that is absent, or only there commented out, is added at the end of the first
+ section: the pool's own section in a pool file, [PHP] in a php.ini. Applying the
+ same directives twice gives the same text.
+
+ Return string
+
+=cut
+
+sub _setDirectives
+{
+    my ($text, $directives) = @_;
+
+    my @add;
+    for my $key ( sort keys %{ $directives } ) {
+        my $line = "$key = $directives->{$key}";
+        push @add, "$line\n" unless $text =~ s/^[ \t]*\Q$key\E[ \t]*=[^\n]*$/$line/mg;
+    }
+
+    return $text unless @add;
+
+    my @lines = split /^/, $text;
+    $lines[-1] .= "\n" if @lines && $lines[-1] !~ /\n\z/;
+
+    my ($headers, $at) = ( 0, scalar @lines );
+    for my $i ( 0 .. $#lines ) {
+        next unless $lines[$i] =~ /^[ \t]*\[[^\n]*\][ \t]*$/;
+        next unless ++$headers == 2;
+        $at = $i;
+        last;
+    }
+
+    # With the section's own lines rather than after the blank lines that
+    # separate it from the next one.
+    $at-- while $at > 0 && $lines[$at - 1] =~ /^\s*$/;
+
+    splice @lines, $at, 0, @add;
+    join '', @lines;
 }
 
 =item _onAfterBuildDmn( \%data )
@@ -650,6 +830,11 @@ sub _wantedPool
  would not survive either is not a pool at all. The frontend filters the same
  list the same way, and neither trusts the other to have done it.
 
+ A pool whose definition is invalid is not a pool either: _checkPools() refuses
+ it at install, update and enable, and until it is put right a vhost naming it is
+ built in the default instance, with stock settings, rather than with half of
+ what was asked for.
+
  Return hashref Pool name => truth
 
 =cut
@@ -658,10 +843,163 @@ sub _pools
 {
     my ($self) = @_;
 
-    my $pools = $self->{'config'}->{'pools'};
-    return {} unless ref $pools eq 'HASH';
+    +{ map { $_ => 1 } keys %{ $self->_poolDefinitions()->{'pools'} } };
+}
 
-    +{ map { $_ => 1 } grep { /^[a-z0-9][a-z0-9-]*$/ } keys %{ $pools } };
+# What each key of a pool's proxy and fpm settings may be set to. Anything not
+# listed is refused: in particular no php_value or php_admin_value, which would
+# let a pool override the open_basedir and other limits i-MSCP puts on a vhost.
+my %PROXY_KEYS = (
+    flushpackets => qr/^(?:on|off|auto)$/,
+    flushwait    => qr/^[0-9]+$/,
+    timeout      => qr/^[0-9]+$/
+);
+
+my %FPM_KEYS = (
+    'pm'                        => qr/^(?:static|dynamic|ondemand)$/,
+    'pm.max_children'           => qr/^[0-9]+$/,
+    'pm.start_servers'          => qr/^[0-9]+$/,
+    'pm.min_spare_servers'      => qr/^[0-9]+$/,
+    'pm.max_spare_servers'      => qr/^[0-9]+$/,
+    'pm.max_spawn_rate'         => qr/^[0-9]+$/,
+    'pm.max_requests'           => qr/^[0-9]+$/,
+    'pm.process_idle_timeout'   => qr/^[0-9]+[smhd]?$/,
+    'request_terminate_timeout' => qr/^[0-9]+[smhd]?$/,
+    'request_slowlog_timeout'   => qr/^[0-9]+[smhd]?$/
+);
+
+=item _poolDefinitions( )
+
+ Every pool in config.php, parsed and validated
+
+ A pool is either a label alone -- 'cloudflare' => 'Cloudflare' -- or an array
+ holding a label and any of proxy, fpm and php_ini. Names that could not be a
+ service or a directory are passed over silently, as they always have been; a
+ definition that is wrong in any other way is reported, naming the pool and the
+ key, and left out.
+
+ Return hashref { pools => { name => \%definition }, errors => [ messages ] }
+
+=cut
+
+sub _poolDefinitions
+{
+    my ($self) = @_;
+
+    return $self->{'_poolDefinitions'} if $self->{'_poolDefinitions'};
+
+    my ( %pools, @errors );
+    my $configured = $self->{'config'}->{'pools'};
+
+    if ( ref $configured eq 'HASH' ) {
+        for my $name ( sort keys %{ $configured } ) {
+            next unless $name =~ /^[a-z0-9][a-z0-9-]*$/;
+
+            my ($pool, $error) = _parsePool( $configured->{$name} );
+            if ( defined $error ) {
+                push @errors, sprintf(
+                    "The '%s' pool in the SGW_PhpVersion plugin's config.php is invalid: %s", $name, $error
+                );
+                next;
+            }
+
+            $pools{$name} = $pool;
+        }
+    }
+
+    $self->{'_poolDefinitions'} = { pools => \%pools, errors => \@errors };
+}
+
+=item _parsePool( $value )
+
+ Parse one pool's definition
+
+ Return list (\%definition) on success, (undef, $message) on failure
+
+=cut
+
+sub _parsePool
+{
+    my ($value) = @_;
+
+    my $scalar = sub {
+        my ($what, $v) = @_;
+        return "$what must be a string or a number" unless defined $v && !ref $v;
+        return "$what must not contain a line break" if $v =~ /[\r\n\0]/;
+        undef;
+    };
+
+    unless ( ref $value ) {
+        my $error = $scalar->( 'the label', $value );
+        return ( undef, $error ) if $error;
+        return { label => $value, proxy => {}, fpm => {}, php_ini => {} };
+    }
+
+    return ( undef, 'it must be a label or an array' ) unless ref $value eq 'HASH';
+
+    for my $key ( sort keys %{ $value } ) {
+        return ( undef, "'$key' is not a pool setting (label, proxy, fpm, php_ini)" )
+            unless grep { $_ eq $key } qw/ label proxy fpm php_ini /;
+    }
+
+    return ( undef, "'label' is required" ) unless defined $value->{'label'};
+    my $error = $scalar->( "'label'", $value->{'label'} );
+    return ( undef, $error ) if $error;
+    return ( undef, "'label' must not be empty" ) unless length $value->{'label'};
+
+    my %pool = ( label => $value->{'label'} );
+
+    for my $section ( qw/ proxy fpm php_ini / ) {
+        my $settings = $value->{$section};
+
+        # PHP's array() with nothing in it reaches the backend as a JSON list.
+        $settings = {} if !defined $settings || ( ref $settings eq 'ARRAY' && !@{ $settings } );
+        return ( undef, "'$section' must be an array of settings" ) unless ref $settings eq 'HASH';
+
+        my $allowed = $section eq 'proxy' ? \%PROXY_KEYS : $section eq 'fpm' ? \%FPM_KEYS : undef;
+
+        for my $key ( sort keys %{ $settings } ) {
+            my $v = $settings->{$key};
+
+            if ( $allowed ) {
+                return ( undef, sprintf(
+                    "%s key '%s' is not allowed (allowed: %s)", $section, $key, join( ', ', sort keys %{ $allowed } )
+                )) unless $allowed->{$key};
+            } else {
+                return ( undef, "php_ini key '$key' is not an ini directive name" )
+                    unless $key =~ /^[A-Za-z0-9_.]+$/;
+            }
+
+            $error = $scalar->( "$section key '$key'", $v );
+            return ( undef, $error ) if $error;
+
+            return ( undef, "$section key '$key' cannot be '$v'" )
+                if $allowed && $v !~ $allowed->{$key};
+        }
+
+        $pool{$section} = { %{ $settings } };
+    }
+
+    \%pool;
+}
+
+=item _checkPools( )
+
+ Refuse a config.php whose pools are not all valid
+
+ Return int 0 if every pool is valid, 1 otherwise
+
+=cut
+
+sub _checkPools
+{
+    my ($self) = @_;
+
+    delete $self->{'_poolDefinitions'};
+    my $errors = $self->_poolDefinitions()->{'errors'};
+
+    error( $_ ) for @{ $errors };
+    @{ $errors } ? 1 : 0;
 }
 
 =item _appliedPool( \%row )
@@ -1035,8 +1373,13 @@ sub _syncPhpConf
 
         # buildConfFile() strips every comment out of i-MSCP's templates, so a
         # file that has just been put in front of the person who is meant to
-        # edit it arrives saying nothing about itself at all.
-        $err ||= _markHandTuned( $destination, $pool ) if length $pool && !$err;
+        # edit it arrives saying nothing about itself at all. A pool's php_ini
+        # settings are seeded into its php.ini at the same moment, and so only
+        # ever into a php.ini the plugin is writing for the first time.
+        $err ||= _markHandTuned(
+            $destination, $pool,
+            ( $template =~ m{/php\.ini$} ? $self->_poolDefinitions()->{'pools'}->{$pool}->{'php_ini'} : undef )
+        ) if length $pool && !$err;
 
         $rs ||= $err;
     }
@@ -1045,13 +1388,13 @@ sub _syncPhpConf
     $rs;
 }
 
-=item _markHandTuned( $filename, $pool )
+=item _markHandTuned( $filename, $pool [, \%directives ] )
 
  Head a pool's configuration file with a note saying it is nobody's but the
- administrator's
+ administrator's, and set any directives the pool's definition seeds it with
 
  The comment syntax is the same for php.ini and for an FPM configuration file,
- which is why one banner does for both.
+ which is why one banner does for both. Both changes go to disk in one write.
 
  Return int 0 on success, other on failure
 
@@ -1059,7 +1402,7 @@ sub _syncPhpConf
 
 sub _markHandTuned
 {
-    my ($filename, $pool) = @_;
+    my ($filename, $pool, $directives) = @_;
 
     my $file = iMSCP::File->new( filename => $filename );
     my $content = $file->get();
@@ -1067,6 +1410,8 @@ sub _markHandTuned
         error( sprintf( "Couldn't read the '%s' file", $filename ));
         return 1;
     }
+
+    $content = _setDirectives( $content, $directives ) if $directives && %{ $directives };
 
     my $rs = $file->set( sprintf( <<"BANNER", $pool ) . $content );
 ; Written for the %s PHP-FPM pool by the i-MSCP SGW_PhpVersion plugin.

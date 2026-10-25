@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0
+
+* A pool in `config.php` may now be an array as well as a label: a `label`, plus
+  `proxy` settings for the vhost's FastCGI `ProxySet` line (`flushpackets`,
+  `flushwait`, `timeout`), `fpm` settings for the vhost's pool file (`pm.*`,
+  `request_terminate_timeout`, `request_slowlog_timeout`), and `php_ini`
+  directives seeded into the pool's `php.ini` when it is first written. `proxy`
+  and `fpm` are applied each time a vhost in the pool is built, from the
+  `afterHttpdBuildConfFile` hook, and are gone the next time it is built
+  elsewhere. A pool given as a string behaves exactly as before.
+* Ships a `chat` pool for applications that stream Server-Sent Events:
+  `flushpackets=on`, a 600 s proxy timeout, 24 `dynamic` workers, a 300 s
+  `request_terminate_timeout` and `output_buffering = 0`.
+* An invalid pool definition stops the plugin installing, updating or enabling,
+  with a message naming the pool and the key. Until it is fixed, the pool is not
+  offered, and a vhost in it is built in the default instance with stock files.
+  `fpm` can never set `php_value` or `php_admin_value`, so i-MSCP's
+  `open_basedir` and other limits always apply.
+* Added `test/sse-probe.php` and `test/sse-probe.sh` (development only) for
+  checking that a vhost delivers each event as it is flushed.
+
 ## 0.3.0
 
 * Added GraphQL support: if the SGW_GraphQL plugin is installed, a domain's
