@@ -285,6 +285,67 @@ That switch covers versions only. A pool has no configuration at all until the
 plugin writes it, so turning the switch off cannot stop a pool being built — it
 would only leave one that could not start.
 
+## Opcache file cache
+
+Every vhost of one PHP version and pool runs under the same FPM master, and they
+all share that master's opcache shared memory. With many sites per master it
+fills within seconds of a reload and never recovers: whatever compiled first
+stays cached, and every other vhost recompiles every PHP file on every request.
+More memory does not help much, since one WordPress site alone can need around
+100 MB of it.
+
+So the plugin gives each vhost's FPM pool a second-level cache on disk:
+
+```
+php_admin_value[opcache.file_cache] = /var/cache/php-opcache/<domain name>
+```
+
+Opcache serves a script that isn't in shared memory from there instead of
+compiling it, and that includes the case where the shared memory is full. On a
+production master with about 140 WordPress pools, this took a vhost's
+time-to-first-byte from 1.1–2.3 s to 0.4–0.5 s.
+
+- **One directory per vhost.** Opcache creates its directories `0700`, owned by
+  whichever pool user writes first, so in one shared directory every other
+  user is silently locked out and goes on compiling. Each vhost's directory is
+  `0700` and owned by the vhost's user, under a root owned by root and set to
+  `0711`, so each user can reach its own directory but not list anyone else's.
+- **Every vhost gets the line,** on the default version and in the default
+  instance as well as in a named pool, every time it is built. A line already
+  in the file is replaced, never duplicated. A vhost with no PHP, or one that
+  forwards elsewhere, gets neither the line nor a directory.
+- **Changing version empties the directory,** because opcache keys its cache by
+  a system id that differs between PHP versions. A change of pool alone keeps
+  it.
+- **Deleting the vhost removes the directory.**
+- **Built in, not in place.** A vhost gets the line the next time it is
+  rebuilt. Turning the file cache on doesn't rebuild every vhost, and neither
+  does disabling the plugin: disabling rebuilds only the vhosts that have a
+  version or pool recorded, and every other vhost keeps the line until its next
+  rebuild. Uninstalling therefore leaves the directories where they are. Once
+  every vhost has been rebuilt without the line, you can delete the root
+  yourself.
+- **The plugin only touches a directory that is plainly a file cache.** It
+  chowns, empties or removes a directory under the root only when that
+  directory holds nothing but opcache's `<32 hex digits>/` system-id
+  directories; anything else fails the build, or is left alone on deletion. A
+  symlink is never followed.
+
+Set the root with `opcache_file_cache` in `config.php`. The default is
+`/var/cache/php-opcache`, and `''` turns the feature off. The path must be
+absolute, made of letters, digits, `.`, `_`, `-` and `/`, with no `.` or `..`
+segment. It can't be `/`, or anything in or under i-MSCP's `USER_WEB_DIR`. An
+invalid root stops the plugin installing, updating or enabling. The setting
+belongs to the plugin, so the rule that keeps `php_value` and `php_admin_value`
+out of pool definitions still holds.
+
+What the plugin doesn't do, because it is site policy: size the masters' shared
+memory, set `opcache.validate_permission`, or prune `.bin` files that are no
+longer read. That last one includes system-id directories orphaned by a PHP
+package upgrade. A WordPress vhost holds roughly 75–95 MB of cache. Leave
+`opcache.validate_timestamps` on, so that edits and updates are still picked up
+from the file cache.
+
 ## GraphQL
 
 If [SGW_GraphQL](https://github.com/saygoweb/imscp-graphql) is installed, this
@@ -347,7 +408,8 @@ recorded, so re-enabling restores them. Uninstalling additionally stops and
 disables the services it woke up, pool masters included.
 
 What uninstalling does **not** remove is the `/etc/php/<version>-<pool>`
-directories and the `/etc/systemd/system/php<version>-fpm-<pool>.service` units.
+directories, the `/etc/systemd/system/php<version>-fpm-<pool>.service` units, or
+the opcache file cache directories (see [Opcache file cache](#opcache-file-cache)).
 They have been tuned by hand by then, and an administrator who reinstalls the
 plugin should find them as they were left. Delete them yourself if you want them
 gone.

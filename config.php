@@ -31,6 +31,17 @@ return array(
     // just by moving between versions.
     'sync_php_conf' => true,
 
+    // Per-vhost opcache file cache: a second-level cache that opcache serves a
+    // script from when it is not in the FPM master's shared memory -- which, with
+    // many sites under one master, is most of the time, because the shared
+    // memory fills within seconds and never recovers. Every vhost's pool is
+    // given php_admin_value[opcache.file_cache] = <this>/<domain name>, in a
+    // directory of its own owned by its own user: opcache creates its
+    // directories 0700, so one shared directory would lock out every user but
+    // the first. An absolute path, not in or under i-MSCP's USER_WEB_DIR; ''
+    // turns it off. See "Opcache file cache" in the README.
+    'opcache_file_cache' => '/var/cache/php-opcache',
+
     // PHP-FPM instances a domain may be placed in, beyond the one the
     // distribution ships. Each is a master process of its own, with its own
     // service and its own configuration directory, so that it can be tuned --
