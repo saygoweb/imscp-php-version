@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+* Each vhost's FPM pool now gets its own opcache file cache, a second-level
+  cache that opcache serves a script from when the master's shared memory is
+  full. With many sites per master, that is most of the time. Every vhost built,
+  on the default version and pool as well as in a named pool, gets
+  `php_admin_value[opcache.file_cache] = <root>/<domain name>`, in a directory
+  owned by the vhost's user and set to `0700`, under a root owned by root and
+  set to `0711`. The directory is emptied when the vhost changes PHP version and
+  removed when the vhost is deleted.
+* New `opcache_file_cache` setting in `config.php`: the root, by default
+  `/var/cache/php-opcache`, or `''` to turn the cache off. An invalid path stops
+  the plugin installing, updating or enabling.
+
 ## 0.4.0
 
 * A pool in `config.php` may now be an array as well as a label: a `label`, plus

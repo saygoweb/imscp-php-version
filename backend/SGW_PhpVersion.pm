@@ -25,6 +25,7 @@ package Plugin::SGW_PhpVersion;
 
 use strict;
 use warnings;
+use Cwd ();
 use File::Basename;
 use iMSCP::Database;
 use iMSCP::Debug;
@@ -88,6 +89,7 @@ sub install
 
     my $rs = $self->_checkRequirements();
     $rs ||= $self->_checkPools();
+    $rs ||= $self->_checkFileCache();
     $rs ||= $self->_refreshInstalledVersions();
     $rs;
 }
@@ -106,6 +108,7 @@ sub update
 
     my $rs = $self->_checkRequirements();
     $rs ||= $self->_checkPools();
+    $rs ||= $self->_checkFileCache();
     $rs ||= $self->_refreshInstalledVersions();
     $rs;
 }
@@ -132,6 +135,7 @@ sub enable
 
     my $rs = $self->_checkRequirements();
     $rs ||= $self->_checkPools();
+    $rs ||= $self->_checkFileCache();
     $rs ||= $self->_refreshInstalledVersions();
     return $rs if $rs;
 
@@ -220,6 +224,10 @@ sub uninstall
         }
     }
 
+    # The opcache file cache stays. Only the vhosts that had a row are rebuilt
+    # without it on the way out; every other vhost's pool goes on naming its
+    # directory until it is next rebuilt, so removing them here would leave
+    # those pools pointing at nothing.
     $rs;
 }
 
@@ -355,8 +363,17 @@ sub _onBeforeBuildDmn
     my $rs = $self->_ensurePool( $version, $pool );
     return $rs if $rs;
 
+    # Likewise the vhost's opcache file cache directory, which FPM is about to
+    # be pointed at and which nothing but its own user may write into.
+    my $fileCache = $self->_fileCacheDir( $data );
+    if ( length $fileCache ) {
+        $rs = $self->_ensureFileCacheDir( $fileCache, $data->{'USER'}, $data->{'GROUP'} );
+        return $rs if $rs;
+    }
+
     $self->{'current'} = {
-        row => $row, version => $version, pool => $pool, building => 1
+        row => $row, version => $version, pool => $pool, building => 1,
+        fileCache => $fileCache
     };
     $self->_pushVersion( $version, $pool );
     0;
@@ -364,13 +381,15 @@ sub _onBeforeBuildDmn
 
 =item _onAfterBuildConfFile( \$cfgTpl, $filename, \%data, \%options )
 
- Apply the proxy and FPM settings of the pool the vhost being built is in
+ Apply the proxy and FPM settings of the pool the vhost being built is in, and
+ point its FPM pool at its own opcache file cache
 
  Only the vhost and pool files of the vhost inside the build bracket are ever
- touched, and only when its pool says something about them. Every other file --
- a vhost in the default instance, or in a pool that is a label alone -- reaches
- disk exactly as i-MSCP rendered it. Leaving a pool needs nothing undone: the
- next build renders the stock files and nothing here edits them.
+ touched. The proxy and FPM settings only apply when the vhost's pool says
+ something about them; the opcache file cache applies to every vhost, in the
+ default instance as much as in a named pool, whenever config.php turns it on.
+ Leaving a pool, or turning the file cache off, needs nothing undone: the next
+ build renders the stock files and nothing here edits them.
 
  Return int 0
 
@@ -381,16 +400,24 @@ sub _onAfterBuildConfFile
     my ($self, $cfgTpl, $filename) = @_;
 
     my $ctx = $self->{'current'} or return 0;
-    return 0 unless $ctx->{'building'} && length $ctx->{'pool'};
+    return 0 unless $ctx->{'building'};
 
-    my $pool = $self->_poolDefinitions()->{'pools'}->{ $ctx->{'pool'} } or return 0;
+    my $pool = length $ctx->{'pool'}
+        ? $self->_poolDefinitions()->{'pools'}->{ $ctx->{'pool'} } : undef;
 
-    if ( $filename eq 'domain.tpl' && %{ $pool->{'proxy'} } ) {
-        ${ $cfgTpl } = _tuneVhost( ${ $cfgTpl }, $pool->{'proxy'} );
-    } elsif ( $filename eq 'pool.conf' && %{ $pool->{'fpm'} } ) {
+    if ( $filename eq 'domain.tpl' ) {
+        ${ $cfgTpl } = _tuneVhost( ${ $cfgTpl }, $pool->{'proxy'} )
+            if $pool && %{ $pool->{'proxy'} };
+    } elsif ( $filename eq 'pool.conf' ) {
         ${ $cfgTpl } = _tuneFpmPool(
             ${ $cfgTpl }, $pool->{'fpm'}, _token( $ctx->{'version'}, $ctx->{'pool'} )
-        );
+        ) if $pool && %{ $pool->{'fpm'} };
+
+        # Set by the plugin, not by a pool definition, which is why it is no
+        # breach of the rule that keeps php_admin_value out of those.
+        ${ $cfgTpl } = _setDirectives(
+            ${ $cfgTpl }, { 'php_admin_value[opcache.file_cache]' => $ctx->{'fileCache'} }
+        ) if length( $ctx->{'fileCache'} // '' );
     }
 
     0;
@@ -560,6 +587,12 @@ sub _onAfterBuildDmn
         $self->_touch( $wasVersion, $wasPool );
     }
 
+    # Opcache keys its file cache by a system id that differs from one PHP
+    # version to the next, so what the old version left is never read again.
+    if ( $wasVersion ne $version && length( $ctx->{'fileCache'} // '' )) {
+        $rs ||= $self->_emptyFileCacheDir( $ctx->{'fileCache'} );
+    }
+
     $self->_touch( $version, $pool );
 
     $rs ||= $self->_recordApplied( $ctx->{'row'}, $data, $version, $pool );
@@ -593,7 +626,8 @@ sub _onBeforeDelDmn
 
 =item _onAfterDelDmn( \%data )
 
- Restore the configuration and drop the row for a vhost that no longer exists.
+ Restore the configuration, remove the vhost's opcache file cache, and drop the
+ row for a vhost that no longer exists.
 
  Return int 0 on success, other on failure
 
@@ -607,6 +641,10 @@ sub _onAfterDelDmn
 
     $self->_popVersion();
     $self->_touch( $ctx->{'version'}, $ctx->{'pool'} );
+
+    # Whether or not the vhost ever had a row: the file cache is kept for every
+    # vhost, including those on the default version.
+    $self->_removeFileCacheDir( $data->{'DOMAIN_NAME'} );
 
     return 0 unless $ctx->{'row'};
 
@@ -1762,6 +1800,310 @@ sub _reapDeletedRows
         error( $qrs );
         return 1;
     }
+
+    0;
+}
+
+=item _parseFileCacheRoot( $value )
+
+ Validate the opcache_file_cache setting from config.php
+
+ An empty value turns the file cache off. Anything else must be an absolute path
+ made of plain path characters, with no '.' or '..' segment, that is neither the
+ filesystem root nor anywhere in or under the directory i-MSCP keeps the vhosts'
+ own files in: every directory beneath it is chowned to a vhost's user and is
+ emptied when the vhost changes version.
+
+ Return list ($root) on success, '' when off; (undef, $message) on failure
+
+=cut
+
+sub _parseFileCacheRoot
+{
+    my ($value) = @_;
+
+    return ( '' ) unless defined $value && length $value;
+    return ( undef, 'it must be a path' ) if ref $value;
+
+    ( my $root = $value ) =~ s{/+\z}{};
+    $root =~ s{//+}{/}g;
+
+    return ( undef, "'$value' is not an absolute path" ) unless $value =~ m{^/};
+    return ( undef, "'$value' may only contain letters, digits, '.', '_', '-' and '/'" )
+        unless $root =~ m{^[A-Za-z0-9._/-]*\z};
+    return ( undef, "'$value' must not contain a '.' or '..' segment" )
+        if grep { $_ eq '.' || $_ eq '..' } split m{/}, $root;
+    return ( undef, "'$value' must not be the filesystem root" ) unless length $root;
+
+    my $webDir = $::imscpConfig{'USER_WEB_DIR'} || '/var/www/virtual';
+    $webDir =~ s{/+\z}{};
+    return ( undef, "'$value' must not be in or under $webDir, where the vhosts' own files are" )
+        if $root eq $webDir || index( $root, "$webDir/" ) == 0;
+
+    ( $root );
+}
+
+=item _fileCacheRoot( )
+
+ The directory every vhost's opcache file cache is kept under, or '' when the
+ file cache is off
+
+ Off as well while the plugin is putting every vhost back on the default --
+ disable() and uninstall() -- so that those rebuilds drop the line, and off when
+ the setting is invalid, which _checkFileCache() reports.
+
+ Return string
+
+=cut
+
+sub _fileCacheRoot
+{
+    my ($self) = @_;
+
+    return '' if $self->{'forceDefault'};
+
+    my ($root) = _parseFileCacheRoot( $self->{'config'}->{'opcache_file_cache'} );
+    $root // '';
+}
+
+=item _checkFileCache( )
+
+ Refuse a config.php whose opcache_file_cache is not valid
+
+ Return int 0 if valid, 1 otherwise
+
+=cut
+
+sub _checkFileCache
+{
+    my ($self) = @_;
+
+    my (undef, $error) = _parseFileCacheRoot( $self->{'config'}->{'opcache_file_cache'} );
+    return 0 unless defined $error;
+
+    error( "The opcache_file_cache setting in the SGW_PhpVersion plugin's config.php is invalid: $error" );
+    1;
+}
+
+=item _isDomainName( $name )
+
+ Whether a name is one i-MSCP could have given a vhost, and so safe to use as a
+ directory name under the file cache root
+
+ Return bool
+
+=cut
+
+sub _isDomainName
+{
+    my ($name) = @_;
+
+    defined $name && $name =~ /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/i;
+}
+
+=item _fileCacheDir( \%data )
+
+ The opcache file cache directory of the vhost being built, or '' if it has none
+
+ One directory per vhost, never a shared one: opcache creates the directories
+ under its file cache 0700, owned by whichever pool user writes first, and every
+ other pool's user is then silently locked out and goes on compiling. A vhost
+ that has no FPM pool -- no PHP, or forwarded elsewhere -- has no use for one.
+
+ Return string
+
+=cut
+
+sub _fileCacheDir
+{
+    my ($self, $data) = @_;
+
+    my $root = $self->_fileCacheRoot();
+    return '' unless length $root;
+    return '' if ( $data->{'PHP_SUPPORT'} // 'yes' ) ne 'yes';
+    return '' if ( $data->{'FORWARD'} // 'no' ) ne 'no';
+    return '' unless _isDomainName( $data->{'DOMAIN_NAME'} );
+
+    "$root/$data->{'DOMAIN_NAME'}";
+}
+
+=item _isFileCacheTree( $dir )
+
+ Whether a directory holds nothing but what opcache writes into a file cache:
+ one directory per PHP system id, named by its 32 hex digits
+
+ The test every chown, emptying and removal under the file cache root has to
+ pass first, so that a root pointed at the wrong place costs a failed build
+ rather than somebody's files.
+
+ Return bool
+
+=cut
+
+sub _isFileCacheTree
+{
+    my ($dir) = @_;
+
+    return 0 if -l $dir || !-d _;
+
+    opendir my $dh, $dir or return 0;
+    my @entries = grep { !/^\.{1,2}\z/ } readdir $dh;
+    closedir $dh;
+
+    for my $entry ( @entries ) {
+        return 0 unless $entry =~ /^[0-9a-f]{32}\z/;
+        return 0 if -l "$dir/$entry" || !-d _;
+    }
+
+    1;
+}
+
+=item _ensureFileCacheDir( $dir, $user, $group )
+
+ Make sure a vhost's opcache file cache directory exists, 0700 and owned by the
+ vhost's user, under a root that is root's, 0711
+
+ The root is 0711 so that each pool's user can reach its own directory without
+ being able to list anyone else's. A directory owned by anyone else -- a vhost
+ that has changed user -- holds entries the new owner could not replace, so it
+ is emptied before it is handed over.
+
+ Return int 0 on success, other on failure
+
+=cut
+
+sub _ensureFileCacheDir
+{
+    my ($self, $dir, $user, $group) = @_;
+
+    my $uid = defined $user ? getpwnam( $user ) : undef;
+    my $gid = defined $group ? getgrnam( $group ) : undef;
+    unless ( defined $uid && defined $gid ) {
+        error( sprintf(
+            "Couldn't create the '%s' opcache file cache directory: no such user or group '%s:%s'",
+            $dir, $user // '', $group // ''
+        ));
+        return 1;
+    }
+
+    local $@;
+    eval {
+        iMSCP::Dir->new( dirname => dirname( $dir ))->make( {
+            user  => $::imscpConfig{'ROOT_USER'} || 'root',
+            group => $::imscpConfig{'ROOT_GROUP'} || 'root',
+            mode  => 0711
+        } );
+
+        if ( -e $dir || -l $dir ) {
+            die( sprintf(
+                "The '%s' opcache file cache directory holds something other than an opcache file cache; it has been left alone.",
+                $dir
+            )) unless _isFileCacheTree( $dir );
+
+            my (undef, undef, undef, undef, $owner, $ownerGroup) = stat $dir;
+            _clearDir( $dir ) if $owner != $uid || $ownerGroup != $gid;
+        }
+
+        iMSCP::Dir->new( dirname => $dir )->make( {
+            user => $user, group => $group, mode => 0700
+        } );
+    };
+    if ( $@ ) {
+        error( $@ );
+        return 1;
+    }
+
+    0;
+}
+
+=item _clearDir( $dir )
+
+ Remove everything in a directory, keeping the directory itself
+
+ Return void, die on failure
+
+=cut
+
+sub _clearDir
+{
+    my ($dir) = @_;
+
+    opendir my $dh, $dir or die( sprintf( "Couldn't open the '%s' directory: %s", $dir, $! ));
+    my @entries = grep { !/^\.{1,2}\z/ } readdir $dh;
+    closedir $dh;
+
+    iMSCP::Dir->new( dirname => "$dir/$_" )->remove() for @entries;
+}
+
+=item _emptyFileCacheDir( $dir )
+
+ Empty a vhost's opcache file cache directory
+
+ Return int 0 on success, other on failure
+
+=cut
+
+sub _emptyFileCacheDir
+{
+    my ($self, $dir) = @_;
+
+    return 0 unless -d $dir;
+
+    unless ( _isFileCacheTree( $dir )) {
+        error( sprintf(
+            "The '%s' opcache file cache directory holds something other than an opcache file cache; it has not been emptied.",
+            $dir
+        ));
+        return 1;
+    }
+
+    local $@;
+    eval { _clearDir( $dir ); };
+    if ( $@ ) {
+        error( $@ );
+        return 1;
+    }
+
+    0;
+}
+
+=item _removeFileCacheDir( $domainName )
+
+ Remove a deleted vhost's opcache file cache directory
+
+ Only a directory whose real path is directly under the real path of the root,
+ named for the vhost, and holding nothing but an opcache file cache. A cache
+ that cannot be removed is reported but does not fail the vhost's deletion.
+
+ Return int 0
+
+=cut
+
+sub _removeFileCacheDir
+{
+    my ($self, $domainName) = @_;
+
+    my ($root) = _parseFileCacheRoot( $self->{'config'}->{'opcache_file_cache'} );
+    return 0 unless defined $root && length $root && _isDomainName( $domainName );
+
+    my $dir = "$root/$domainName";
+    return 0 unless -e $dir || -l $dir;
+
+    my $realRoot = Cwd::realpath( $root );
+    my $realDir = Cwd::realpath( $dir );
+    unless ( defined $realRoot && defined $realDir && $realDir eq "$realRoot/$domainName"
+        && _isFileCacheTree( $dir )
+    ) {
+        warning( sprintf(
+            "The '%s' opcache file cache directory has been left alone: it is not a plain opcache file cache directly under '%s'.",
+            $dir, $root
+        ));
+        return 0;
+    }
+
+    local $@;
+    eval { iMSCP::Dir->new( dirname => $dir )->remove(); };
+    warning( $@ ) if $@;
 
     0;
 }
