@@ -55,8 +55,10 @@ return array(
     // cache next to a shared memory is not. The plugin writes a drop-in into the
     // version's fpm/conf.d and gives its vhosts the file cache line on their
     // next build; taking a version off the list strips every one of its pools'
-    // lines again. Off by default. See "Why not PHP 7.4 and 8.0" in the README.
-    'opcache_file_cache_only_versions' => array(),
+    // lines again. array() turns it off. 7.4 is listed because it is the default
+    // version for most vhosts on aws1, where opcache's shared memory is always full.
+    // See "Why not PHP 7.4 and 8.0" in the README.
+    'opcache_file_cache_only_versions' => array('7.4'),
 
     // A weekly systemd timer (sgw-php-opcache-prune.timer) deletes every .bin
     // file in the file cache that has not been read for this many days, then
