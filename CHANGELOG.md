@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1
+
+* `config.php` now lists 7.4 in `opcache_file_cache_only_versions`. Every
+  PHP 7.4 FPM master runs opcache with `file_cache_only`, and 7.4 vhosts get a
+  per-vhost file cache again, without the 7.4 shared-memory bug. To undo it,
+  set the list back to `array()`: the plugin then strips the line from every
+  7.4 pool before it removes the drop-in.
+
 ## 0.7.0
 
 * The opcache file cache is now pruned weekly by a plugin-owned systemd timer,
