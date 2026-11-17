@@ -31,6 +31,7 @@ use iMSCP::Database;
 use iMSCP::Debug;
 use iMSCP::Dir;
 use iMSCP::EventManager;
+use iMSCP::Execute 'execute';
 use iMSCP::File;
 use iMSCP::ProgramFinder;
 use iMSCP::Service;
@@ -92,6 +93,7 @@ sub install
     $rs ||= $self->_checkFileCache();
     $rs ||= $self->_refreshInstalledVersions();
     $rs ||= $self->_syncFileCacheOnly();
+    $rs ||= $self->_ensurePruneTimer();
     $rs;
 }
 
@@ -112,6 +114,7 @@ sub update
     $rs ||= $self->_checkFileCache();
     $rs ||= $self->_refreshInstalledVersions();
     $rs ||= $self->_syncFileCacheOnly();
+    $rs ||= $self->_ensurePruneTimer();
     $rs;
 }
 
@@ -151,6 +154,7 @@ sub enable
     $rs = $self->_scheduleRebuild( "php_version <> '' OR php_pool <> ''" );
     $rs ||= $self->_startVersionsInUse();
     $rs ||= $self->_syncFileCacheOnly();
+    $rs ||= $self->_ensurePruneTimer();
     $rs;
 }
 
@@ -181,7 +185,9 @@ sub disable
     # if no enable() follows.
     $self->{'fileCacheOnlyOff'} = 1;
 
-    $self->_scheduleRebuild( "applied_version <> '' OR applied_pool <> ''" );
+    my $rs = $self->_scheduleRebuild( "applied_version <> '' OR applied_pool <> ''" );
+    $rs ||= $self->_removePruneTimer();
+    $rs;
 }
 
 =item uninstall( )
@@ -248,6 +254,9 @@ sub uninstall
     # must not have one.
     delete $self->{'fileCacheOnlyOff'};
     $rs ||= $self->_syncFileCacheOnly( 1 );
+
+    # The prune timer goes, since the script it runs goes with the plugin.
+    $rs ||= $self->_removePruneTimer();
     $rs;
 }
 
@@ -1925,8 +1934,209 @@ sub _checkFileCache
         return 1;
     }
 
+    unless ( defined $self->_pruneMaxAgeDays() ) {
+        error( sprintf(
+            "The opcache_file_cache_max_age_days setting in the SGW_PhpVersion plugin's config.php is invalid: '%s' is not a whole number of days from 1 to 3650",
+            $self->{'config'}->{'opcache_file_cache_max_age_days'}
+        ));
+        return 1;
+    }
+
     0;
 }
+
+=item _pruneMaxAgeDays( )
+
+ How many days a .bin file may go unread before the prune removes it
+
+ Return int|undef Days, or undef if the setting is invalid
+
+=cut
+
+sub _pruneMaxAgeDays
+{
+    my ($self) = @_;
+
+    my $days = $self->{'config'}->{'opcache_file_cache_max_age_days'};
+    return 30 unless defined $days && length $days;
+    return undef if ref $days || $days !~ /^[1-9][0-9]{0,3}\z/ || $days > 3650;
+
+    $days + 0;
+}
+
+# The prune's systemd units, by suffix.
+my $PRUNE_UNIT = 'sgw-php-opcache-prune';
+
+=item _pruneUnits( $root, $days )
+
+ The text of the prune's service and timer units
+
+ The service is sandboxed down to the one directory it prunes: everything else
+ is read-only to it, it has no network, and it runs at idle I/O priority.
+
+ Return hashref { service => text, timer => text }
+
+=cut
+
+sub _pruneUnits
+{
+    my ($self, $root, $days) = @_;
+
+    my $script = $self->{'pruneScript'}
+        // ( $::imscpConfig{'PLUGINS_DIR'} || '/var/www/imscp/gui/plugins' ) . '/SGW_PhpVersion/backend/opcache-prune.pl';
+
+    {
+        service => <<"SERVICE",
+# Written by the i-MSCP SGW_PhpVersion plugin, which rewrites it on install,
+# update and enable and removes it on disable and uninstall. Set
+# opcache_file_cache and opcache_file_cache_max_age_days in its config.php.
+[Unit]
+Description=Prune the per-vhost PHP opcache file cache (SGW_PhpVersion)
+Documentation=https://github.com/saygoweb/imscp-php-version#opcache-file-cache
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/perl $script --max-age-days $days $root
+Nice=19
+IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=$root
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+SERVICE
+        timer => <<"TIMER",
+# Written by the i-MSCP SGW_PhpVersion plugin; see $PRUNE_UNIT.service.
+[Unit]
+Description=Weekly prune of the per-vhost PHP opcache file cache (SGW_PhpVersion)
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMER
+    };
+}
+
+=item _ensurePruneTimer( )
+
+ Write, enable and start the prune's timer, or remove it when the file cache is
+ off
+
+ Rewritten every time, because what it runs depends on config.php. Needs
+ systemd; anywhere else the cache is simply not pruned, which is said once and
+ is no reason to refuse the plugin.
+
+ Return int 0 on success, other on failure
+
+=cut
+
+sub _ensurePruneTimer
+{
+    my ($self) = @_;
+
+    my ($root) = _parseFileCacheRoot( $self->{'config'}->{'opcache_file_cache'} );
+    my $days = $self->_pruneMaxAgeDays();
+    return $self->_removePruneTimer() unless defined $root && length $root && defined $days;
+
+    my $service = $self->{'service'} // iMSCP::Service->getInstance();
+    unless ( $service->isSystemd() ) {
+        warning( "The opcache file cache is not pruned: that needs systemd." );
+        return 0;
+    }
+
+    my $unitDir = $self->{'unitDir'} // '/etc/systemd/system';
+    my $units = $self->_pruneUnits( $root, $days );
+
+    local $@;
+    eval {
+        # ReadWritePaths= refuses to start the service on a path that is not
+        # there, and the first vhost build may not have made it yet.
+        iMSCP::Dir->new( dirname => $root )->make( {
+            user  => $::imscpConfig{'ROOT_USER'} || 'root',
+            group => $::imscpConfig{'ROOT_GROUP'} || 'root',
+            mode  => 0711
+        } );
+
+        for my $suffix ( qw/ service timer / ) {
+            my $file = iMSCP::File->new( filename => "$unitDir/$PRUNE_UNIT.$suffix" );
+            my $rs = $file->set( $units->{$suffix} );
+            $rs ||= $file->save();
+            $rs ||= $file->owner( $::imscpConfig{'ROOT_USER'} || 'root', $::imscpConfig{'ROOT_GROUP'} || 'root' );
+            $rs ||= $file->mode( 0644 );
+            die( "Couldn't write $unitDir/$PRUNE_UNIT.$suffix\n" ) if $rs;
+        }
+
+        $self->_systemctl( 'daemon-reload' );
+        $self->_systemctl( 'enable', '--now', "$PRUNE_UNIT.timer" );
+    };
+    if ( $@ ) {
+        error( $@ );
+        return 1;
+    }
+
+    0;
+}
+
+=item _systemctl( @args )
+
+ Run systemctl
+
+ Not through iMSCP::Service: its unit resolver cannot find a unit that is not a
+ .service -- it drops the suffix when it builds the file name -- so every call
+ on the prune's .timer fails with "Couldn't resolve the ... unit".
+
+ Return void, die on failure
+
+=cut
+
+sub _systemctl
+{
+    my ($self, @args) = @_;
+
+    return $self->{'systemctl'}->( @args ) if $self->{'systemctl'};
+
+    my $rs = execute( [ 'systemctl', @args ], \my $stdout, \my $stderr );
+    die( sprintf( "systemctl %s failed: %s\n", join( ' ', @args ), $stderr || 'unknown error' )) if $rs;
+}
+
+=item _removePruneTimer( )
+
+ Stop, disable and remove the prune's timer and service, if they are there
+
+ Return int 0 on success, other on failure
+
+=cut
+
+sub _removePruneTimer
+{
+    my ($self) = @_;
+
+    my $unitDir = $self->{'unitDir'} // '/etc/systemd/system';
+    my @files = grep { -e } map { "$unitDir/$PRUNE_UNIT.$_" } qw/ timer service /;
+    return 0 unless @files;
+
+    local $@;
+    eval {
+        $self->_systemctl( 'disable', '--now', "$PRUNE_UNIT.timer" ) if -e "$unitDir/$PRUNE_UNIT.timer";
+        for my $file ( @files ) {
+            my $rs = iMSCP::File->new( filename => $file )->delFile();
+            die( "Couldn't remove $file\n" ) if $rs;
+        }
+        $self->_systemctl( 'daemon-reload' );
+    };
+    if ( $@ ) {
+        error( $@ );
+        return 1;
+    }
+
+    0;
+}
+
 
 =item _fileCacheMinVersion( )
 

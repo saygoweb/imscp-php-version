@@ -21,7 +21,7 @@
 return array(
     'author'      => 'Cambell Prince',
     'email'       => 'cambell.prince@gmail.com',
-    'version'     => '0.6.0',
+    'version'     => '0.7.0',
     'require_api' => '1.5.1',
     'date'        => '2026-11-17',
     'name'        => 'SGW_PhpVersion',
