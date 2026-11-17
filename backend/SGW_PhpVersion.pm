@@ -91,6 +91,7 @@ sub install
     $rs ||= $self->_checkPools();
     $rs ||= $self->_checkFileCache();
     $rs ||= $self->_refreshInstalledVersions();
+    $rs ||= $self->_syncFileCacheOnly();
     $rs;
 }
 
@@ -110,6 +111,7 @@ sub update
     $rs ||= $self->_checkPools();
     $rs ||= $self->_checkFileCache();
     $rs ||= $self->_refreshInstalledVersions();
+    $rs ||= $self->_syncFileCacheOnly();
     $rs;
 }
 
@@ -133,6 +135,11 @@ sub enable
     # vhost onto the default version while its row still names another one.
     $self->{'forceDefault'} = 0;
 
+    # Likewise the removal of the file_cache_only drop-ins that disable() put
+    # off: an update or a change re-enables straight away, and those masters'
+    # pools are to keep their file cache.
+    delete $self->{'fileCacheOnlyOff'};
+
     my $rs = $self->_checkRequirements();
     $rs ||= $self->_checkPools();
     $rs ||= $self->_checkFileCache();
@@ -143,6 +150,7 @@ sub enable
     # on the default in the meantime, so ask for it to be built again.
     $rs = $self->_scheduleRebuild( "php_version <> '' OR php_pool <> ''" );
     $rs ||= $self->_startVersionsInUse();
+    $rs ||= $self->_syncFileCacheOnly();
     $rs;
 }
 
@@ -166,6 +174,12 @@ sub disable
     # Read by _wantedVersion() for the rest of this run: every domain rebuilt
     # from here on is built on the default, whatever its row says.
     $self->{'forceDefault'} = 1;
+
+    # Not here and now: a plugin update or change calls enable() straight
+    # after, and taking the drop-ins out would strip the file cache from every
+    # unpinned pool of those versions on every update. The END block does it
+    # if no enable() follows.
+    $self->{'fileCacheOnlyOff'} = 1;
 
     $self->_scheduleRebuild( "applied_version <> '' OR applied_pool <> ''" );
 }
@@ -228,6 +242,12 @@ sub uninstall
     # without it on the way out; every other vhost's pool goes on naming its
     # directory until it is next rebuilt, so removing them here would leave
     # those pools pointing at nothing.
+    #
+    # The file_cache_only drop-ins go, though, and with them every pool's
+    # file cache line on those versions: without file_cache_only, 7.4 and 8.0
+    # must not have one.
+    delete $self->{'fileCacheOnlyOff'};
+    $rs ||= $self->_syncFileCacheOnly( 1 );
     $rs;
 }
 
@@ -1900,6 +1920,11 @@ sub _checkFileCache
         return 1;
     }
 
+    unless ( defined $self->_fileCacheOnlyVersions() ) {
+        error( "The opcache_file_cache_only_versions setting in the SGW_PhpVersion plugin's config.php is invalid: it must be a list of versions such as array('7.4')" );
+        return 1;
+    }
+
     0;
 }
 
@@ -1950,7 +1975,187 @@ sub _fileCacheVersionOk
     my $min = $self->_fileCacheMinVersion();
     return 0 unless defined $min && defined $version && $version =~ /^[0-9]+\.[0-9]+\z/;
 
+    return 1 if grep { $_ eq $version } @{ $self->_fileCacheOnlyVersions() // [] };
+
     _compareVersions( $version, $min ) >= 0;
+}
+
+=item _fileCacheOnlyVersions( )
+
+ The versions whose FPM masters run opcache in file_cache_only mode, and whose
+ vhosts therefore get a file cache below opcache_file_cache_min_version as well
+
+ Return arrayref|undef Versions, or undef if the setting is invalid
+
+=cut
+
+sub _fileCacheOnlyVersions
+{
+    my ($self) = @_;
+
+    my $list = $self->{'config'}->{'opcache_file_cache_only_versions'};
+    return [] unless defined $list;
+    return undef unless ref $list eq 'ARRAY';
+    return undef if grep { !defined $_ || ref $_ || !/^[0-9]+\.[0-9]+\z/ } @{ $list };
+
+    [ @{ $list } ];
+}
+
+# The drop-in that puts every FPM master of one version into file_cache_only
+# mode. FPM's scan directory is compiled in, so the version's own conf.d covers
+# its pool masters as well as the distribution's.
+my $FILE_CACHE_ONLY_INI = '99-sgw-opcache-file-cache-only.ini';
+
+=item _fileCacheOnlyIni( $root, $version )
+
+ The text of one version's file_cache_only drop-in
+
+ opcache refuses file_cache_only at master startup unless file_cache is set
+ there too, before any pool has overridden it. The master's own directory is
+ root's: a pool that is not given one of its own -- the distribution's www pool
+ -- compiles every script rather than writing into anybody else's.
+
+ Return string
+
+=cut
+
+sub _fileCacheOnlyIni
+{
+    my ($root, $version) = @_;
+
+    <<"INI";
+; Written by the i-MSCP SGW_PhpVersion plugin because opcache_file_cache_only_versions
+; in its config.php lists $version. Removed, along with every pool's
+; opcache.file_cache line, when the version is taken off that list.
+;
+; PHP 7.4 and 8.0 corrupt static variables and segfault workers when opcache
+; loads a script from the file cache into process memory while other workers
+; are still storing scripts in shared memory. With file_cache_only nothing is
+; stored in shared memory at all, so that cannot happen: every script comes
+; from its pool's own file cache instead. See "Why not PHP 7.4 and 8.0" in the
+; plugin's README.
+opcache.file_cache_only = 1
+opcache.file_cache = $root/.master
+INI
+}
+
+=item _syncFileCacheOnly( [ $off ] )
+
+ Put the file_cache_only drop-in in place for every version that is to have
+ one, and take it out of every other
+
+ Taking one out first strips the opcache.file_cache line from every pool file
+ of that version, in the distribution's instance and in every pool's: a pool
+ left with the line and without file_cache_only is exactly the crash. Every
+ running master of a version whose drop-in changed is reloaded, so that no
+ master runs one way while its pool files say the other.
+
+ Return int 0 on success, other on failure
+
+=cut
+
+sub _syncFileCacheOnly
+{
+    my ($self, $off) = @_;
+
+    my ($root) = _parseFileCacheRoot( $self->{'config'}->{'opcache_file_cache'} );
+    my %want;
+    unless ( $off || !defined $root || !length $root ) {
+        %want = map { $_ => 1 } @{ $self->_fileCacheOnlyVersions() // [] };
+    }
+
+    my $phpRoot = dirname( $self->{'phpConfig'}->{'PHP_CONF_DIR_PATH'} );
+    my @versions = grep { /^[0-9]+\.[0-9]+\z/ && -d "$phpRoot/$_/fpm/conf.d" }
+        map { basename( $_ ) } glob "$phpRoot/*";
+
+    my (@changed, $rs);
+    $rs = 0;
+
+    local $@;
+    eval {
+        for my $version ( @versions ) {
+            my $ini = "$phpRoot/$version/fpm/conf.d/$FILE_CACHE_ONLY_INI";
+
+            if ( $want{$version} ) {
+                my $text = _fileCacheOnlyIni( $root, $version );
+                my $file = iMSCP::File->new( filename => $ini );
+                next if -f $ini && ( $file->get() // '' ) eq $text;
+
+                iMSCP::Dir->new( dirname => $root )->make( {
+                    user  => $::imscpConfig{'ROOT_USER'} || 'root',
+                    group => $::imscpConfig{'ROOT_GROUP'} || 'root',
+                    mode  => 0711
+                } );
+                iMSCP::Dir->new( dirname => "$root/.master" )->make( {
+                    user  => $::imscpConfig{'ROOT_USER'} || 'root',
+                    group => $::imscpConfig{'ROOT_GROUP'} || 'root',
+                    mode  => 0700
+                } );
+
+                my $err = $file->set( $text );
+                $err ||= $file->save();
+                $err ||= $file->mode( 0644 );
+                die( "Couldn't write $ini\n" ) if $err;
+                push @changed, $version;
+            } elsif ( -e $ini ) {
+                for my $poolFile ( glob( "$phpRoot/$version/fpm/pool.d/*.conf" ),
+                    glob( "$phpRoot/$version-*/fpm/pool.d/*.conf" )
+                ) {
+                    my $file = iMSCP::File->new( filename => $poolFile );
+                    my $text = $file->get();
+                    die( "Couldn't read $poolFile\n" ) unless defined $text;
+                    next unless $text =~ s/^[ \t]*php_admin_value\[opcache\.file_cache\][ \t]*=[^\n]*\n?//mg;
+
+                    my $err = $file->set( $text );
+                    $err ||= $file->save();
+                    die( "Couldn't write $poolFile\n" ) if $err;
+                }
+
+                iMSCP::File->new( filename => $ini )->delFile() and die( "Couldn't remove $ini\n" );
+                push @changed, $version;
+            }
+        }
+    };
+    if ( $@ ) {
+        error( $@ );
+        $rs = 1;
+    }
+
+    $rs ||= $self->_reloadMasters( $phpRoot, $_ ) for @changed;
+    $rs;
+}
+
+=item _reloadMasters( $phpRoot, $version )
+
+ Reload every running FPM master of one version: the distribution's and each
+ pool's
+
+ Return int 0 on success, other on failure
+
+=cut
+
+sub _reloadMasters
+{
+    my ($self, $phpRoot, $version) = @_;
+
+    my @pools = ( '', map { /^\Q$version\E-([a-z0-9][a-z0-9-]*)\z/ ? $1 : () }
+        map { basename( $_ ) } glob "$phpRoot/$version-*" );
+
+    my $service = $self->{'service'} // iMSCP::Service->getInstance();
+
+    local $@;
+    eval {
+        for my $pool ( @pools ) {
+            my $unit = _serviceName( $version, $pool );
+            $service->reload( $unit ) if $service->isRunning( $unit );
+        }
+    };
+    if ( $@ ) {
+        error( $@ );
+        return 1;
+    }
+
+    0;
 }
 
 =item _isDomainName( $name )
@@ -2235,6 +2440,12 @@ END
         # Whatever the reloads report, the exit status of the run is not this
         # block's to change.
         local $?;
+
+        # A disable() that no enable() followed: the plugin really is being
+        # disabled, so the file_cache_only drop-ins go, and every pool's line
+        # on those versions with them.
+        $instance->_syncFileCacheOnly( 1 ) if delete $instance->{'fileCacheOnlyOff'};
+
         $instance->_onBeforeHttpdRestart();
     }
 

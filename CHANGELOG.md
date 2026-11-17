@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0
+
+* New `opcache_file_cache_only_versions` setting in `config.php` (empty by
+  default), to give PHP 7.4 or 8.0 a file cache safely. For each version listed
+  there, the plugin:
+  * writes a drop-in to the version's `fpm/conf.d` that sets
+    `opcache.file_cache_only = 1` and a master-level `opcache.file_cache`;
+  * reloads every running master of the version;
+  * gives the version's vhosts the per-vhost file cache line on their next
+    build.
+
+  With nothing stored in shared memory, the 7.4 and 8.0 map_ptr bug can't
+  happen. Taking a version off the list, turning the file cache off, disabling
+  the plugin or uninstalling it strips the line from every pool of that version
+  before it removes the drop-in. A plugin update leaves both in place.
+
 ## 0.5.2
 
 * Fixed: PHP 8.0 has the same opcache file cache bug as 7.4, so the default

@@ -388,13 +388,40 @@ A deterministic two-worker reproduction gives these results:
 | 7.4.33 | off | no | no |
 | 7.4.33, 8.0.30 | on, `opcache.file_cache_only=1` on the master | no | no |
 
-The last row is a way to give 7.4 or 8.0 a file cache safely. Set
-`opcache.file_cache_only=1` on every FPM master of that version, together with
-a master-level `opcache.file_cache` that each pool overrides. The master then
-stores nothing in shared memory, so no slot is ever handed out twice. The cost
-is that every script on that master is loaded from disk on each request. That
-is still faster than compiling it, which is what a full shared memory means
-today.
+The last row is a way to give 7.4 or 8.0 a file cache safely, and the plugin
+can set it up. List the versions in `opcache_file_cache_only_versions`, for
+example `array('7.4')`. It is empty by default. For each listed version the
+plugin:
+
+- writes `/etc/php/<version>/fpm/conf.d/99-sgw-opcache-file-cache-only.ini`,
+  which sets `opcache.file_cache_only = 1` and a master-level
+  `opcache.file_cache = <root>/.master`. Opcache refuses `file_cache_only` at
+  master startup without one. The `.master` directory is root's, mode `0700`.
+  FPM's scan directory is compiled in, so the version's own `conf.d` covers the
+  version's pool masters (`<version>-<pool>`) as well as the distribution's.
+- reloads every running master of that version.
+- gives the version's vhosts the per-vhost `opcache.file_cache` line on their
+  next build, below the minimum version too.
+
+Each master then stores nothing in shared memory, so no slot is ever handed out
+twice, and every script is loaded from its pool's own file cache on each
+request. That is still faster than compiling it, which is what a full shared
+memory means today. A pool with no directory of its own, such as the
+distribution's `www` pool, can't write into `.master` and compiles every
+script.
+
+Until a vhost is rebuilt it has no line of its own, so on a master in
+`file_cache_only` mode it gets no opcache at all. Rebuild the version's vhosts,
+or add their lines in a one-off rollout, right after listing a version.
+
+Taking a version off the list, turning `opcache_file_cache` off, disabling the
+plugin or uninstalling it undoes all of this. The plugin strips the
+`opcache.file_cache` line from every pool file of that version, and only then
+removes the drop-in and reloads the masters. A 7.4 or 8.0 pool never keeps the
+line after its master leaves `file_cache_only` mode. A plugin update or change
+calls `disable()` and then `enable()`, so the plugin defers the removal on
+disable and drops it again when `enable()` follows; updating the plugin leaves
+everything where it is.
 
 ## GraphQL
 
