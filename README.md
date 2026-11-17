@@ -310,10 +310,21 @@ time-to-first-byte from 1.1–2.3 s to 0.4–0.5 s.
   user is silently locked out and goes on compiling. Each vhost's directory is
   `0700` and owned by the vhost's user, under a root owned by root and set to
   `0711`, so each user can reach its own directory but not list anyone else's.
-- **Every vhost gets the line,** on the default version and in the default
-  instance as well as in a named pool, every time it is built. A line already
-  in the file is replaced, never duplicated. A vhost with no PHP, or one that
-  forwards elsewhere, gets neither the line nor a directory.
+- **Every vhost on PHP 8.0 or later gets the line,** on the default version
+  and in the default instance as well as in a named pool, every time it is
+  built. A line already in the file is replaced, never duplicated. A vhost with
+  no PHP, or one that forwards elsewhere, gets neither the line nor a directory.
+- **PHP 7.x never gets it.** PHP 7.4's opcache segfaults FPM workers once its
+  shared memory is full and a file cache is set: on a production 7.4.33 master,
+  workers in the affected pools died with SIGSEGV within seconds of starting,
+  while 8.3, 8.4 and 8.5 masters with full shared memory ran the same setting
+  without a fault. Below `opcache_file_cache_min_version` (default `8.0`) the
+  plugin creates no directory, and the vhost's next build takes out any
+  `opcache.file_cache` line its pool has, so moving a vhost down to 7.x also
+  cleans it up.
+- **A plugin update rebuilds every pinned vhost at once,** so they all start
+  with a cold cache together, and the first request to each can be slow (one
+  took 23 s in production).
 - **Changing version empties the directory,** because opcache keys its cache by
   a system id that differs between PHP versions. A change of pool alone keeps
   it.
