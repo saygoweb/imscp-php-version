@@ -1894,7 +1894,7 @@ sub _checkFileCache
 
     unless ( defined $self->_fileCacheMinVersion() ) {
         error( sprintf(
-            "The opcache_file_cache_min_version setting in the SGW_PhpVersion plugin's config.php is invalid: '%s' is not a version such as '8.0'",
+            "The opcache_file_cache_min_version setting in the SGW_PhpVersion plugin's config.php is invalid: '%s' is not a version such as '8.1'",
             $self->{'config'}->{'opcache_file_cache_min_version'}
         ));
         return 1;
@@ -1908,11 +1908,17 @@ sub _checkFileCache
  The lowest PHP version a vhost is given an opcache file cache on, or undef if
  the setting is invalid
 
- PHP 7.x's opcache segfaults FPM workers when its shared memory is full and a
- file cache is set: seen on 7.4.33 in production, where every worker of an
- affected pool died with SIGSEGV within seconds of starting, while 8.3, 8.4 and
- 8.5 masters with full shared memory ran the same setting without a fault. So
- by default only 8.0 and later get one.
+ PHP 7.4 and 8.0 corrupt function static variables, and segfault FPM workers,
+ when a file cache is set and the shared memory is full: seen on 7.4.33 in
+ production, every worker of an affected pool dying with SIGSEGV in
+ ZEND_BIND_STATIC within seconds of starting. A script that no longer fits the
+ shared memory is loaded from the file cache into the worker's own memory but
+ still marked immutable, so its static variables and run-time cache are given
+ map_ptr slots private to the worker -- which another worker then hands to a
+ script it stores in shared memory, so that the two collide. PHP 8.1 keeps
+ those in the worker's own arena instead (php/php-src@5d160e309e), and 7.3
+ predates map_ptr, but 7.3's opcache is past end of life too. So by default
+ only 8.1 and later get one.
 
  Return string|undef
 
@@ -1923,7 +1929,7 @@ sub _fileCacheMinVersion
     my ($self) = @_;
 
     my $min = $self->{'config'}->{'opcache_file_cache_min_version'};
-    return '8.0' unless defined $min && length $min;
+    return '8.1' unless defined $min && length $min;
     return undef if ref $min || $min !~ /^[0-9]+\.[0-9]+\z/;
 
     $min;

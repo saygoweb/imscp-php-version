@@ -310,18 +310,18 @@ time-to-first-byte from 1.1–2.3 s to 0.4–0.5 s.
   user is silently locked out and goes on compiling. Each vhost's directory is
   `0700` and owned by the vhost's user, under a root owned by root and set to
   `0711`, so each user can reach its own directory but not list anyone else's.
-- **Every vhost on PHP 8.0 or later gets the line,** on the default version
+- **Every vhost on PHP 8.1 or later gets the line,** on the default version
   and in the default instance as well as in a named pool, every time it is
   built. A line already in the file is replaced, never duplicated. A vhost with
   no PHP, or one that forwards elsewhere, gets neither the line nor a directory.
-- **PHP 7.x never gets it.** PHP 7.4's opcache segfaults FPM workers once its
-  shared memory is full and a file cache is set: on a production 7.4.33 master,
-  workers in the affected pools died with SIGSEGV within seconds of starting,
-  while 8.3, 8.4 and 8.5 masters with full shared memory ran the same setting
-  without a fault. Below `opcache_file_cache_min_version` (default `8.0`) the
-  plugin creates no directory, and the vhost's next build takes out any
-  `opcache.file_cache` line its pool has, so moving a vhost down to 7.x also
-  cleans it up.
+- **PHP 7.4 and 8.0 never get it.** Their opcache corrupts function static
+  variables, and segfaults FPM workers, once the shared memory is full and a
+  file cache is set. On a production 7.4.33 master, workers in the affected
+  pools died with SIGSEGV in `ZEND_BIND_STATIC` within seconds of starting.
+  Below `opcache_file_cache_min_version` (default `8.1`) the plugin creates no
+  directory, and the vhost's next build takes out any `opcache.file_cache` line
+  its pool has, so moving a vhost down a version also cleans it up. See
+  [Why not PHP 7.4 and 8.0](#why-not-php-74-and-80).
 - **A plugin update rebuilds every pinned vhost at once,** so they all start
   with a cold cache together, and the first request to each can be slow (one
   took 23 s in production).
@@ -356,6 +356,45 @@ longer read. That last one includes system-id directories orphaned by a PHP
 package upgrade. A WordPress vhost holds roughly 75–95 MB of cache. Leave
 `opcache.validate_timestamps` on, so that edits and updates are still picked up
 from the file cache.
+
+### Why not PHP 7.4 and 8.0
+
+A script that no longer fits the master's shared memory is loaded from the file
+cache into the worker's own memory, but 7.4 and 8.0 keep it marked immutable.
+Its functions' static variables and run-time cache are therefore given map_ptr
+slots that only that worker uses, numbered from the shared count
+`ZCSG(map_ptr_last)`. Meanwhile, another worker that stores a script in shared
+memory publishes its own count as the new shared one, and that count includes
+the same slot numbers. A worker that runs both scripts reads one function's
+static variables through the other's slot. `ZEND_BIND_STATIC` then reads a
+wrong or empty hash table, and the worker crashes.
+
+The window is open while the shared memory is too full for large scripts but
+still takes small ones. Opcache only stops storing once the largest free block
+is under 64 KB, which on a busy multi-site master is a long time.
+
+PHP 8.1 keeps those two pointers in the worker's own arena instead (php/php-src
+commit 5d160e309e, "Fix static variable behavior with inheritance"). That
+change was never backported. 7.3 predates map_ptr and does not show it.
+
+A deterministic two-worker reproduction gives these results:
+
+| PHP | File cache | Static variables corrupted | SIGSEGV |
+|---|---|---|---|
+| 7.3.33 | on | no | no |
+| 7.4.33 | on | yes | yes |
+| 8.0.30 | on | yes | yes |
+| 8.1–8.4 | on | no | no |
+| 7.4.33 | off | no | no |
+| 7.4.33, 8.0.30 | on, `opcache.file_cache_only=1` on the master | no | no |
+
+The last row is a way to give 7.4 or 8.0 a file cache safely. Set
+`opcache.file_cache_only=1` on every FPM master of that version, together with
+a master-level `opcache.file_cache` that each pool overrides. The master then
+stores nothing in shared memory, so no slot is ever handed out twice. The cost
+is that every script on that master is loaded from disk on each request. That
+is still faster than compiling it, which is what a full shared memory means
+today.
 
 ## GraphQL
 

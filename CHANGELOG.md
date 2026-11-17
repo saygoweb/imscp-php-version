@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.2
+
+* Fixed: PHP 8.0 has the same opcache file cache bug as 7.4, so the default
+  `opcache_file_cache_min_version` is now `8.1`. The root cause is that a
+  script loaded from the file cache into process memory, because it doesn't fit
+  the full shared memory, still claims map_ptr slots for its static variables
+  and run-time cache that another worker then reuses for a script it stores in
+  shared memory. Fixed upstream in PHP 8.1. See "Why not PHP 7.4 and 8.0" in the
+  README.
+
 ## 0.5.1
 
 * Fixed: the opcache file cache made PHP 7.4 FPM workers segfault once the
