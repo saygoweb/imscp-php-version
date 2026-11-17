@@ -216,6 +216,17 @@ ok(!Plugin::SGW_PhpVersion::_isDomainName($_), "'$_' is not")
     is($min->('8')->_checkFileCache(), 1, 'an invalid minimum stops install, update and enable');
     is($min->('8')->_fileCacheDir({ %data }, '8.3'), '', 'and gives nobody a file cache meanwhile');
     is($min->('8.0')->_checkFileCache(), 0, 'a valid one does not');
+
+    # file_cache_only versions get a file cache below the minimum, because
+    # their masters store nothing in shared memory.
+    my $fco = sub { plugin(config => { opcache_file_cache => '/var/cache/php-opcache',
+        opcache_file_cache_only_versions => $_[0] }) };
+    is($fco->([ '7.4' ])->_fileCacheDir({ %data }, '7.4'), '/var/cache/php-opcache/example.com',
+        'a file_cache_only version gets a file cache below the minimum');
+    is($fco->([ '7.4' ])->_fileCacheDir({ %data }, '8.0'), '', 'a version not listed still does not');
+    is($fco->([])->_checkFileCache(), 0, 'an empty list is valid');
+    is($fco->('7.4')->_checkFileCache(), 1, 'a list that is not a list is not');
+    is($fco->([ '7' ])->_checkFileCache(), 1, 'nor is one holding something that is not a version');
 }
 
 # The line in the vhost's pool file.
@@ -361,7 +372,73 @@ SKIP: {
     unlink "$root/link.com";
 }
 
+# The file_cache_only drop-ins, on disk.
+
+SKIP: {
+    skip 'writing configuration files needs root', 1 if $>;
+
+    my $php = tempdir(CLEANUP => 1);
+    my $cacheRoot = tempdir(CLEANUP => 1) . '/php-opcache';
+    my $spit = sub { my ($f, $t) = @_; make_path(dirname($f)); open my $fh, '>', $f or die $!; print {$fh} $t; close $fh };
+    my $slurp = sub { open my $fh, '<', $_[0] or return undef; local $/; <$fh> };
+    my $LINE = "php_admin_value[opcache.file_cache] = $cacheRoot/x.com\n";
+
+    make_path("$php/$_/fpm/conf.d") for qw/ 7.3 7.4 8.0 8.3 /;
+    $spit->("$php/7.4/fpm/pool.d/a.com.conf", "[a.com]\nuser = a\n$LINE");
+    $spit->("$php/7.4-chat/fpm/pool.d/b.com.conf", "[b.com]\nuser = b\n$LINE");
+    $spit->("$php/8.3/fpm/pool.d/c.com.conf", "[c.com]\nuser = c\n$LINE");
+
+    my $service = FakeService->new;
+    my $p = sub {
+        plugin(
+            phpConfig => { PHP_CONF_DIR_PATH => "$php/7.3" },
+            config    => { opcache_file_cache => $cacheRoot, opcache_file_cache_only_versions => $_[0] },
+            service   => $service
+        );
+    };
+    my $ini = sub { "$php/$_[0]/fpm/conf.d/99-sgw-opcache-file-cache-only.ini" };
+
+    is($p->([ '7.4' ])->_syncFileCacheOnly(), 0, 'listing 7.4');
+    like($slurp->($ini->('7.4')), qr/^opcache\.file_cache_only = 1$/m, 'puts 7.4 into file_cache_only mode');
+    like($slurp->($ini->('7.4')), qr/^opcache\.file_cache = \Q$cacheRoot\E\/\.master$/m,
+        'with the master-level file cache opcache insists on');
+    ok(-d "$cacheRoot/.master", 'which exists');
+    is(sprintf('%o', (stat "$cacheRoot/.master")[2] & 07777), '700', 'and is nobody\'s but root\'s');
+    ok(!-e $ini->($_), "and leaves $_ alone") for qw/ 7.3 8.0 8.3 /;
+    is_deeply($service->{'calls'}, [ 'reload php7.4-fpm', 'reload php7.4-fpm-chat' ],
+        'every running master of 7.4 is reloaded');
+
+    @{ $service->{'calls'} } = ();
+    $p->([ '7.4' ])->_syncFileCacheOnly();
+    is_deeply($service->{'calls'}, [], 'running it again changes nothing and reloads nothing');
+
+    is($p->([])->_syncFileCacheOnly(), 0, 'taking 7.4 off the list');
+    ok(!-e $ini->('7.4'), 'removes its drop-in');
+    unlike($slurp->("$php/7.4/fpm/pool.d/a.com.conf"), qr/opcache\.file_cache/,
+        'and the line from its pools in the distribution\'s instance');
+    unlike($slurp->("$php/7.4-chat/fpm/pool.d/b.com.conf"), qr/opcache\.file_cache/,
+        'and in each pool\'s instance');
+    like($slurp->("$php/7.4/fpm/pool.d/a.com.conf"), qr/^user = a$/m, 'leaving the rest of the file');
+    like($slurp->("$php/8.3/fpm/pool.d/c.com.conf"), qr/opcache\.file_cache/, 'but not another version\'s');
+    is_deeply($service->{'calls'}, [ 'reload php7.4-fpm', 'reload php7.4-fpm-chat' ], 'and reloads 7.4 again');
+
+    $p->([ '7.4' ])->_syncFileCacheOnly();
+    is($p->([ '7.4' ])->_syncFileCacheOnly(1), 0, 'disable and uninstall');
+    ok(!-e $ini->('7.4'), 'remove every drop-in, whatever the list says');
+
+    $p->([ '7.4' ])->_syncFileCacheOnly();
+    is(plugin(phpConfig => { PHP_CONF_DIR_PATH => "$php/7.3" },
+        config => { opcache_file_cache => '', opcache_file_cache_only_versions => [ '7.4' ] },
+        service => $service)->_syncFileCacheOnly(), 0, 'turning the file cache off');
+    ok(!-e $ini->('7.4'), 'removes them too');
+}
+
 done_testing();
+
+package FakeService;
+sub new { bless { calls => [] }, shift }
+sub isRunning { 1 }
+sub reload { push @{ $_[0]{calls} }, "reload $_[1]"; 1 }
 
 package FakeDb;
 sub doQuery { +{} }

@@ -49,6 +49,15 @@ return array(
     // never get one by default.
     'opcache_file_cache_min_version' => '8.1',
 
+    // Versions below that minimum whose FPM masters are to run opcache with
+    // opcache.file_cache_only = 1 -- no shared memory at all, every script from
+    // its pool's own file cache -- which is safe on 7.4 and 8.0 where a file
+    // cache next to a shared memory is not. The plugin writes a drop-in into the
+    // version's fpm/conf.d and gives its vhosts the file cache line on their
+    // next build; taking a version off the list strips every one of its pools'
+    // lines again. Off by default. See "Why not PHP 7.4 and 8.0" in the README.
+    'opcache_file_cache_only_versions' => array(),
+
     // PHP-FPM instances a domain may be placed in, beyond the one the
     // distribution ships. Each is a master process of its own, with its own
     // service and its own configuration directory, so that it can be tuned --
