@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0
+
+* The opcache file cache is now pruned weekly by a plugin-owned systemd timer,
+  `sgw-php-opcache-prune.timer`. Each run:
+  * deletes `*.bin` files not read for `opcache_file_cache_max_age_days` (a
+    new setting, default 30), then any directories that leaves empty,
+    including system-id directories left behind by PHP upgrades;
+  * removes the directory of any vhost that no FPM pool file points at any
+    more, once the directory is a day old;
+  * logs one line with counts and bytes freed to the journal.
+
+  Each domain is pruned as its directory's owner, without following symlinks
+  or crossing filesystems, and skipping anything that is not opcache's. The
+  timer is installed on install, update and enable, and removed on disable and
+  uninstall, or while `opcache_file_cache` is `''`.
+
 ## 0.6.0
 
 * New `opcache_file_cache_only_versions` setting in `config.php` (empty by

@@ -350,10 +350,42 @@ invalid root stops the plugin installing, updating or enabling. The setting
 belongs to the plugin, so the rule that keeps `php_value` and `php_admin_value`
 out of pool definitions still holds.
 
+**Pruning.** A WordPress vhost holds roughly 75–95 MB of cache, and nothing in
+opcache ever deletes any of it. The plugin installs a weekly systemd timer,
+`sgw-php-opcache-prune.timer`. It is written on install, update and enable,
+and removed on disable and uninstall, or whenever `opcache_file_cache` is
+`''`. Each run:
+
+- deletes every `*.bin` under `<root>/<domain>/<32 hex digits>/` that has not
+  been read for `opcache_file_cache_max_age_days` (default 30), then every
+  directory that leaves empty. A system-id directory left behind by a PHP
+  upgrade is never read again, so it ages out the same way.
+- removes the directory of any vhost that no FPM pool file names in its
+  `opcache.file_cache` line any more: the vhost has gone, or moved to a version
+  that doesn't get the file cache. It waits until the directory is a day old,
+  so a build that has just made the directory but not yet written the pool file
+  is left alone. If no pool file names any directory at all, nothing is treated
+  as orphaned.
+- writes one line to the journal, with domains pruned and skipped, files and
+  bytes freed, directories removed and orphans removed:
+  `journalctl -u sgw-php-opcache-prune`.
+
+The prune runs each `<domain>` in a child process that has dropped to that
+directory's owner, so nothing a vhost user plants in its own cache, such as a
+symlink in place of a directory, can make it delete anything that user could
+not. It follows no symlink, stays on the root's filesystem, and skips any
+`<domain>` directory holding anything but 32-hex directories. The service is
+sandboxed with `ProtectSystem=strict` and write access to the root only. The
+filesystem's default `relatime` updates a file's access time at most once a
+day, which is plenty for a 30-day threshold; on a `noatime` mount, files are
+pruned 30 days after they were written instead.
+
+To see what a run would do: `perl
+/var/www/imscp/gui/plugins/SGW_PhpVersion/backend/opcache-prune.pl --dry-run
+/var/cache/php-opcache`.
+
 What the plugin doesn't do, because it is site policy: size the masters' shared
-memory, set `opcache.validate_permission`, or prune `.bin` files that are no
-longer read. That last one includes system-id directories orphaned by a PHP
-package upgrade. A WordPress vhost holds roughly 75–95 MB of cache. Leave
+memory or set `opcache.validate_permission`. Leave
 `opcache.validate_timestamps` on, so that edits and updates are still picked up
 from the file cache.
 

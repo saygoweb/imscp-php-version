@@ -73,11 +73,15 @@ is(plugin(forceDefault => 1)->_wantedVersion({ php_version => '8.1' }), '7.3',
     local *Plugin::SGW_PhpVersion::_refreshInstalledVersions = sub { 0 };
     local *Plugin::SGW_PhpVersion::_scheduleRebuild       = sub { 0 };
     local *Plugin::SGW_PhpVersion::_startVersionsInUse    = sub { 0 };
+    local *Plugin::SGW_PhpVersion::_syncFileCacheOnly     = sub { 0 };
+    local *Plugin::SGW_PhpVersion::_ensurePruneTimer      = sub { 0 };
 
-    my $p = plugin(forceDefault => 1);
+    my $p = plugin(forceDefault => 1, fileCacheOnlyOff => 1);
     $p->enable();
     ok(!$p->{'forceDefault'},
         'enable() clears the flag disable() set, so a plugin change does not reset every vhost');
+    ok(!$p->{'fileCacheOnlyOff'},
+        'and cancels the file_cache_only removal disable() deferred, so an update keeps the drop-ins');
     is($p->_wantedVersion({ php_version => '8.1' }), '8.1',
         'and a pinned vhost is built on its own version after a disable/enable cycle');
 }

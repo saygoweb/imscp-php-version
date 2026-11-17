@@ -58,6 +58,14 @@ return array(
     // lines again. Off by default. See "Why not PHP 7.4 and 8.0" in the README.
     'opcache_file_cache_only_versions' => array(),
 
+    // A weekly systemd timer (sgw-php-opcache-prune.timer) deletes every .bin
+    // file in the file cache that has not been read for this many days, then
+    // any directory that leaves empty -- which is also how the cache left behind
+    // by a PHP upgrade goes -- and the directory of any vhost no pool file
+    // points at any more. The timer is there only while opcache_file_cache is
+    // set. 1 to 3650.
+    'opcache_file_cache_max_age_days' => 30,
+
     // PHP-FPM instances a domain may be placed in, beyond the one the
     // distribution ships. Each is a master process of its own, with its own
     // service and its own configuration directory, so that it can be tuned --
