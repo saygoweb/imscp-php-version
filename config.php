@@ -43,10 +43,11 @@ return array(
     'opcache_file_cache' => '/var/cache/php-opcache',
 
     // The lowest PHP version a vhost is given the file cache on; below it the
-    // line is taken out of the vhost's pool on its next build. PHP 7.x's opcache
-    // segfaults FPM workers when its shared memory is full and a file cache is
-    // set (seen on 7.4.33), so 7.x vhosts never get one by default.
-    'opcache_file_cache_min_version' => '8.0',
+    // line is taken out of the vhost's pool on its next build. PHP 7.4 and 8.0
+    // corrupt static variables and segfault FPM workers once the shared memory
+    // is full and a file cache is set (seen on 7.4.33; fixed in 8.1), so they
+    // never get one by default.
+    'opcache_file_cache_min_version' => '8.1',
 
     // PHP-FPM instances a domain may be placed in, beyond the one the
     // distribution ships. Each is a master process of its own, with its own

@@ -198,12 +198,13 @@ ok(!Plugin::SGW_PhpVersion::_isDomainName($_), "'$_' is not")
     is($on->()->_fileCacheDir({ %data, DOMAIN_NAME => '../etc' }, '8.3'), '',
         'none for a name that could escape the root');
 
-    # PHP 7.x's opcache segfaults FPM workers once its shared memory is full and
-    # a file cache is set, so by default only 8.0 and up get one.
+    # PHP 7.4 and 8.0 corrupt static variables, and segfault FPM workers, once
+    # the shared memory is full and a file cache is set; 8.1 fixed it.
     is($on->()->_fileCacheDir({ %data }, '7.4'), '', 'none for a vhost on PHP 7.4');
     is($on->()->_fileCacheDir({ %data }, '7.3'), '', 'or 7.3');
-    is($on->()->_fileCacheDir({ %data }, '8.0'), '/var/cache/php-opcache/example.com',
-        'whereas 8.0 gets one');
+    is($on->()->_fileCacheDir({ %data }, '8.0'), '', 'or 8.0, which has the same bug');
+    is($on->()->_fileCacheDir({ %data }, '8.1'), '/var/cache/php-opcache/example.com',
+        'whereas 8.1 gets one');
     is($on->()->_fileCacheDir({ %data }, '8.10'), '/var/cache/php-opcache/example.com',
         'and the minimum compares as a version, not as text');
     is($on->()->_fileCacheDir({ %data }, '8.3-cloudflare'), '', 'a token is not a version');
