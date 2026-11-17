@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+* Fixed: the opcache file cache made PHP 7.4 FPM workers segfault once the
+  master's shared memory was full (seen on 7.4.33 in production). Only vhosts
+  on PHP 8.0 or later now get the file cache. The minimum is the new
+  `opcache_file_cache_min_version` setting in `config.php` (default `8.0`). A
+  vhost below it gets no directory, and its next build removes any
+  `php_admin_value[opcache.file_cache]` line from its pool.
+
 ## 0.5.0
 
 * Each vhost's FPM pool now gets its own opcache file cache, a second-level

@@ -365,7 +365,7 @@ sub _onBeforeBuildDmn
 
     # Likewise the vhost's opcache file cache directory, which FPM is about to
     # be pointed at and which nothing but its own user may write into.
-    my $fileCache = $self->_fileCacheDir( $data );
+    my $fileCache = $self->_fileCacheDir( $data, $version );
     if ( length $fileCache ) {
         $rs = $self->_ensureFileCacheDir( $fileCache, $data->{'USER'}, $data->{'GROUP'} );
         return $rs if $rs;
@@ -414,10 +414,18 @@ sub _onAfterBuildConfFile
         ) if $pool && %{ $pool->{'fpm'} };
 
         # Set by the plugin, not by a pool definition, which is why it is no
-        # breach of the rule that keeps php_admin_value out of those.
-        ${ $cfgTpl } = _setDirectives(
-            ${ $cfgTpl }, { 'php_admin_value[opcache.file_cache]' => $ctx->{'fileCache'} }
-        ) if length( $ctx->{'fileCache'} // '' );
+        # breach of the rule that keeps php_admin_value out of those. A vhost
+        # that is not to have it -- the file cache off, or a PHP version below
+        # opcache_file_cache_min_version -- has any line for it taken out, so
+        # that one put there by hand, or a vhost moved down a version, is
+        # cleaned up by its next build.
+        if ( length( $ctx->{'fileCache'} // '' )) {
+            ${ $cfgTpl } = _setDirectives(
+                ${ $cfgTpl }, { 'php_admin_value[opcache.file_cache]' => $ctx->{'fileCache'} }
+            );
+        } else {
+            ${ $cfgTpl } =~ s/^[ \t]*php_admin_value\[opcache\.file_cache\][ \t]*=[^\n]*\n?//mg;
+        }
     }
 
     0;
@@ -1879,10 +1887,64 @@ sub _checkFileCache
     my ($self) = @_;
 
     my (undef, $error) = _parseFileCacheRoot( $self->{'config'}->{'opcache_file_cache'} );
-    return 0 unless defined $error;
+    if ( defined $error ) {
+        error( "The opcache_file_cache setting in the SGW_PhpVersion plugin's config.php is invalid: $error" );
+        return 1;
+    }
 
-    error( "The opcache_file_cache setting in the SGW_PhpVersion plugin's config.php is invalid: $error" );
-    1;
+    unless ( defined $self->_fileCacheMinVersion() ) {
+        error( sprintf(
+            "The opcache_file_cache_min_version setting in the SGW_PhpVersion plugin's config.php is invalid: '%s' is not a version such as '8.0'",
+            $self->{'config'}->{'opcache_file_cache_min_version'}
+        ));
+        return 1;
+    }
+
+    0;
+}
+
+=item _fileCacheMinVersion( )
+
+ The lowest PHP version a vhost is given an opcache file cache on, or undef if
+ the setting is invalid
+
+ PHP 7.x's opcache segfaults FPM workers when its shared memory is full and a
+ file cache is set: seen on 7.4.33 in production, where every worker of an
+ affected pool died with SIGSEGV within seconds of starting, while 8.3, 8.4 and
+ 8.5 masters with full shared memory ran the same setting without a fault. So
+ by default only 8.0 and later get one.
+
+ Return string|undef
+
+=cut
+
+sub _fileCacheMinVersion
+{
+    my ($self) = @_;
+
+    my $min = $self->{'config'}->{'opcache_file_cache_min_version'};
+    return '8.0' unless defined $min && length $min;
+    return undef if ref $min || $min !~ /^[0-9]+\.[0-9]+\z/;
+
+    $min;
+}
+
+=item _fileCacheVersionOk( $version )
+
+ Whether a vhost on the given PHP version gets an opcache file cache
+
+ Return bool
+
+=cut
+
+sub _fileCacheVersionOk
+{
+    my ($self, $version) = @_;
+
+    my $min = $self->_fileCacheMinVersion();
+    return 0 unless defined $min && defined $version && $version =~ /^[0-9]+\.[0-9]+\z/;
+
+    _compareVersions( $version, $min ) >= 0;
 }
 
 =item _isDomainName( $name )
@@ -1901,9 +1963,10 @@ sub _isDomainName
     defined $name && $name =~ /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/i;
 }
 
-=item _fileCacheDir( \%data )
+=item _fileCacheDir( \%data, $version )
 
- The opcache file cache directory of the vhost being built, or '' if it has none
+ The opcache file cache directory of the vhost being built on the given PHP
+ version, or '' if it has none
 
  One directory per vhost, never a shared one: opcache creates the directories
  under its file cache 0700, owned by whichever pool user writes first, and every
@@ -1916,10 +1979,11 @@ sub _isDomainName
 
 sub _fileCacheDir
 {
-    my ($self, $data) = @_;
+    my ($self, $data, $version) = @_;
 
     my $root = $self->_fileCacheRoot();
     return '' unless length $root;
+    return '' unless $self->_fileCacheVersionOk( $version );
     return '' if ( $data->{'PHP_SUPPORT'} // 'yes' ) ne 'yes';
     return '' if ( $data->{'FORWARD'} // 'no' ) ne 'no';
     return '' unless _isDomainName( $data->{'DOMAIN_NAME'} );

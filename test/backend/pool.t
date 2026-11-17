@@ -187,16 +187,34 @@ ok(!Plugin::SGW_PhpVersion::_isDomainName($_), "'$_' is not")
     my $on = sub { plugin(config => { opcache_file_cache => '/var/cache/php-opcache' }, @_) };
     my %data = (DOMAIN_NAME => 'example.com', PHP_SUPPORT => 'yes', FORWARD => 'no');
 
-    is($on->()->_fileCacheDir({ %data }), '/var/cache/php-opcache/example.com',
+    is($on->()->_fileCacheDir({ %data }, '8.3'), '/var/cache/php-opcache/example.com',
         'a vhost gets a directory of its own, named for it');
-    is(plugin()->_fileCacheDir({ %data }), '', 'none when config.php does not ask for one');
-    is($on->()->_fileCacheDir({ %data, PHP_SUPPORT => 'no' }), '', 'none for a vhost without PHP');
-    is($on->()->_fileCacheDir({ %data, FORWARD => 'http://elsewhere/' }), '',
+    is(plugin()->_fileCacheDir({ %data }, '8.3'), '', 'none when config.php does not ask for one');
+    is($on->()->_fileCacheDir({ %data, PHP_SUPPORT => 'no' }, '8.3'), '', 'none for a vhost without PHP');
+    is($on->()->_fileCacheDir({ %data, FORWARD => 'http://elsewhere/' }, '8.3'), '',
         'none for a forwarded vhost');
-    is($on->(forceDefault => 1)->_fileCacheDir({ %data }), '',
+    is($on->(forceDefault => 1)->_fileCacheDir({ %data }, '8.3'), '',
         'none while disable() or uninstall() rebuild everything onto the default');
-    is($on->()->_fileCacheDir({ %data, DOMAIN_NAME => '../etc' }), '',
+    is($on->()->_fileCacheDir({ %data, DOMAIN_NAME => '../etc' }, '8.3'), '',
         'none for a name that could escape the root');
+
+    # PHP 7.x's opcache segfaults FPM workers once its shared memory is full and
+    # a file cache is set, so by default only 8.0 and up get one.
+    is($on->()->_fileCacheDir({ %data }, '7.4'), '', 'none for a vhost on PHP 7.4');
+    is($on->()->_fileCacheDir({ %data }, '7.3'), '', 'or 7.3');
+    is($on->()->_fileCacheDir({ %data }, '8.0'), '/var/cache/php-opcache/example.com',
+        'whereas 8.0 gets one');
+    is($on->()->_fileCacheDir({ %data }, '8.10'), '/var/cache/php-opcache/example.com',
+        'and the minimum compares as a version, not as text');
+    is($on->()->_fileCacheDir({ %data }, '8.3-cloudflare'), '', 'a token is not a version');
+    my $min = sub { plugin(config => { opcache_file_cache => '/var/cache/php-opcache',
+        opcache_file_cache_min_version => $_[0] }) };
+    is($min->('7.4')->_fileCacheDir({ %data }, '7.4'), '/var/cache/php-opcache/example.com',
+        'the minimum is a config.php setting');
+    is($min->('8.4')->_fileCacheDir({ %data }, '8.3'), '', 'which can be raised too');
+    is($min->('8')->_checkFileCache(), 1, 'an invalid minimum stops install, update and enable');
+    is($min->('8')->_fileCacheDir({ %data }, '8.3'), '', 'and gives nobody a file cache meanwhile');
+    is($min->('8.0')->_checkFileCache(), 0, 'a valid one does not');
 }
 
 # The line in the vhost's pool file.
@@ -249,6 +267,13 @@ sub build_conf
 
     my $off = plugin(current => { building => 1, version => '7.3', pool => '', fileCache => '' });
     is(build_conf($off, 'pool.conf', $poolConf), $poolConf, 'with the file cache off the file is untouched');
+    my $withLine = $poolConf . "$LINE\n";
+    is(build_conf($off, 'pool.conf', $withLine), $poolConf,
+        'a vhost that is not to have the file cache has any line for it taken out');
+    is($count->(build_conf($off, 'pool.conf', $built)), 0,
+        'so moving a vhost down to 7.x cleans its pool up on the next build');
+    is($count->(build_conf($default, 'pool.conf', $poolConf)), 1,
+        'and moving it back up puts the line back');
     is(build_conf($default, 'domain.tpl', "<VirtualHost>\n</VirtualHost>\n"), "<VirtualHost>\n</VirtualHost>\n",
         'and the vhost file is never touched by it');
     is(build_conf(plugin(current => { version => '7.3', pool => '', fileCache => '/x/y.com' }),
